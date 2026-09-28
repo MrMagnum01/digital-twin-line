@@ -26,6 +26,7 @@ from __future__ import annotations
 import hashlib
 import json
 import pickle
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -96,6 +97,27 @@ def _fingerprint(obj) -> str:
     return hashlib.sha256(pickle.dumps(obj, protocol=pickle.HIGHEST_PROTOCOL)).hexdigest()
 
 
+def _thaw(value):
+    """Recursively turns a deep-frozen structure (MappingProxyType/tuple, as
+    lock_guard.load_verified_config() returns for cfg) or a plain dict/list
+    into plain dict/list, so json.dumps can sort keys at every level. Needed
+    because sel.cfg is a MappingProxyType, which pickle (and so
+    `_fingerprint`) cannot serialize at all."""
+    if isinstance(value, Mapping):
+        return {k: _thaw(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_thaw(v) for v in value]
+    return value
+
+
+def _content_fingerprint(obj) -> str:
+    """sha256 over a key-sorted JSON rendering of `obj` after `_thaw` - used
+    in place of `_fingerprint` for values pickle cannot serialize (sel.cfg's
+    deep-frozen MappingProxyType tree)."""
+    return hashlib.sha256(
+        json.dumps(_thaw(obj), sort_keys=True, default=str).encode("utf-8")).hexdigest()
+
+
 def _selection_identity(sel) -> str:
     """A sha256 over exactly the fields that define what score_test() is
     about to score - table/lock identity, the generated dataset, the
@@ -108,7 +130,19 @@ def _selection_identity(sel) -> str:
     values is also caught (Astra freeze-review r3 group 4 and r4 group 4,
     2026-09-28: "Bind the persisted selection to the actual
     thresholds/model used" / "Persist the full selection identity and
-    model binding, not just the small threshold subset")."""
+    model binding, not just the small threshold subset").
+
+    Also binds every other value score_test() actually consumes when it
+    calls _score_asset() (labels, events, cfg, sensors) - not just the
+    model/scaler/sensor_mean_std/frames bound above - fingerprinted the same
+    way, so replacement truth, fault events, an edited effective cfg, or a
+    different sensor set is refused under the original selection identity
+    too, not only a replacement model (Astra freeze-review r5 group 4,
+    2026-09-28: "the selection identity must bind EVERY value consumed at
+    scoring ... Astra's probe changes each of those four without changing
+    selection_id"). cfg is fingerprinted with `_content_fingerprint`, not
+    `_fingerprint`: it is the deep-frozen MappingProxyType
+    load_verified_config() returns, which pickle cannot serialize at all."""
     payload = {
         "table": sel.table,
         "lock_version": sel.lock.get("lock_version"),
@@ -124,6 +158,10 @@ def _selection_identity(sel) -> str:
         "scaler_fingerprint": _fingerprint(sel.fs),
         "sensor_mean_std_fingerprint": _fingerprint(sel.sensor_mean_std),
         "frames_fingerprint": _fingerprint(sel.frames),
+        "labels_fingerprint": _fingerprint(sel.labels),
+        "events_fingerprint": _fingerprint(sel.events),
+        "cfg_fingerprint": _content_fingerprint(sel.cfg),
+        "sensors_fingerprint": _fingerprint(sel.sensors),
     }
     return hashlib.sha256(json.dumps(payload, sort_keys=True, default=str).encode("utf-8")).hexdigest()
 

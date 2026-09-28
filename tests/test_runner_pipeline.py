@@ -322,3 +322,49 @@ def test_selection_identity_changes_when_a_frame_is_replaced():
     assert pipeline._selection_identity(sel) != original_id
     with pytest.raises(pipeline.SelectionIntegrityError):
         pipeline.score_test(sel)
+
+
+# --- Astra freeze-review r5 group 4 (2026-09-28): "the selection identity
+# must bind EVERY value consumed at scoring, namely labels, events, the
+# effective cfg and the sensor set, in addition to the model, scaler,
+# sensor_mean_std and frames ... Astra's probe changes each of those four
+# without changing selection_id, and replacement truth or events reach
+# scoring." One regression test per changed input, using the exact
+# replacement values from Astra's adjacent probe
+# (40-sessions/2026-09-28-astra-twin-runner-r5-probes.py) - each must now be
+# refused, both at the identity-hash level and at score_test(). ---
+
+def test_selection_identity_changes_when_labels_are_replaced():
+    sel = pipeline.select("dev")
+    original_id = sel.selection_id
+    sel.labels = ["replacement truth"]
+    assert pipeline._selection_identity(sel) != original_id
+    with pytest.raises(pipeline.SelectionIntegrityError):
+        pipeline.score_test(sel)
+
+
+def test_selection_identity_changes_when_events_are_replaced():
+    sel = pipeline.select("dev")
+    original_id = sel.selection_id
+    sel.events = ["replacement fault episodes"]
+    assert pipeline._selection_identity(sel) != original_id
+    with pytest.raises(pipeline.SelectionIntegrityError):
+        pipeline.score_test(sel)
+
+
+def test_selection_identity_changes_when_cfg_is_replaced():
+    sel = pipeline.select("dev")
+    original_id = sel.selection_id
+    sel.cfg = {"evaluation": "changed"}
+    assert pipeline._selection_identity(sel) != original_id
+    with pytest.raises(pipeline.SelectionIntegrityError):
+        pipeline.score_test(sel)
+
+
+def test_selection_identity_changes_when_sensors_are_replaced():
+    sel = pipeline.select("dev")
+    original_id = sel.selection_id
+    sel.sensors = ["other sensor"]
+    assert pipeline._selection_identity(sel) != original_id
+    with pytest.raises(pipeline.SelectionIntegrityError):
+        pipeline.score_test(sel)
