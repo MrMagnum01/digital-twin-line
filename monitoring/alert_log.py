@@ -52,20 +52,28 @@ def run_monitoring(con, machine: str, frame, cfg: dict, *, rule_k: float = 3.0,
 
     model_alert_count = 0
     model_note = None
+    model_retrospective_windows = 0
     try:
         baseline = fit_baseline(frame, cfg, warmup_windows=model_warmup_windows)
-        model_alert, scores = score_frame(frame, baseline, cfg)
+        # model_alert is already causal-gated (score_frame never alerts on
+        # the baseline's own fitting interval - Astra freeze-review
+        # MUST-FIX 5, 2026-09-28); those windows' scores are retrospective
+        # and reported here only via model_retrospective_windows, never as
+        # an alert.
+        model_alert, scores, _causal = score_frame(frame, baseline, cfg)
         rows += [(now, machine, int(ws), int(ws) + bs, "model", "", float(scores[i]),
                  f"isolation_forest score={scores[i]:.3f} > threshold={baseline['threshold']:.3f} "
                  f"(q{baseline['threshold_quantile']} of a {baseline['warmup_windows']}-window baseline)")
                 for i, ws in zip(np.flatnonzero(model_alert), frame.window_start[model_alert])]
         model_alert_count = int(model_alert.sum())
+        model_retrospective_windows = len(baseline["fit_window_starts"])
     except InsufficientBaselineError as exc:
         model_note = str(exc)
 
     _insert(con, rows)
     return {"machine": machine, "rule_alerts": int(rule_alert.sum()),
            "model_alerts": model_alert_count, "model_note": model_note,
+           "model_retrospective_windows": model_retrospective_windows,
            "rows_written": len(rows)}
 
 

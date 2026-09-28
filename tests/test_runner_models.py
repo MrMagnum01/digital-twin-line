@@ -27,13 +27,48 @@ def test_static_threshold_alert_flags_only_out_of_band_eligible_windows():
     assert list(alert) == [False, False, True, False, True]
 
 
-def test_static_threshold_alert_never_alerts_on_nan_or_ineligible():
+def test_static_threshold_alert_never_alerts_on_ineligible_nan():
     vals = [np.nan, 100.0]
-    eligible = [True, False]
+    eligible = [False, False]
     frame = _frame(vals, eligible)
     mean_std = {"vibration_rms": (10.0, 1.0)}
     alert = model_lib.static_threshold_alert(frame, mean_std, k=2.0, sensors=["vibration_rms"])
     assert list(alert) == [False, False]
+
+
+# --- Astra freeze-review MUST-FIX 2 (2026-09-28): an eligible window with a
+# non-finite feature value/score must raise, not silently become a "no
+# alert" healthy negative. ---
+
+def test_static_threshold_alert_raises_on_eligible_nan():
+    vals = [np.nan, 10.0]
+    eligible = [True, True]
+    frame = _frame(vals, eligible)
+    mean_std = {"vibration_rms": (10.0, 1.0)}
+    with pytest.raises(model_lib.NonFiniteEligibleInputError):
+        model_lib.static_threshold_alert(frame, mean_std, k=2.0, sensors=["vibration_rms"])
+
+
+def test_static_threshold_alert_raises_on_eligible_inf():
+    vals = [np.inf, 10.0]
+    eligible = [True, True]
+    frame = _frame(vals, eligible)
+    mean_std = {"vibration_rms": (10.0, 1.0)}
+    with pytest.raises(model_lib.NonFiniteEligibleInputError):
+        model_lib.static_threshold_alert(frame, mean_std, k=2.0, sensors=["vibration_rms"])
+
+
+def test_train_mean_std_raises_on_non_finite_statistic():
+    f1 = _frame([np.inf, np.inf], [True, True])
+    with pytest.raises(model_lib.NonFiniteEligibleInputError):
+        model_lib.train_mean_std([f1], ["vibration_rms"])
+
+
+def test_isolation_forest_thresholds_raises_on_non_finite_train_scores(cfg):
+    tiny = _tiny_if_cfg(cfg)
+    scores = np.array([1.0, np.nan, 2.0])
+    with pytest.raises(model_lib.NonFiniteEligibleInputError):
+        model_lib.isolation_forest_thresholds(scores, tiny)
 
 
 def test_train_mean_std_pools_across_frames_and_respects_eligibility():
@@ -120,3 +155,33 @@ def test_isolation_forest_alert_never_alerts_on_ineligible_windows(cfg):
     alert = model_lib.isolation_forest_alert(test_frame, fs, model, thr)
     assert alert.dtype == np.bool_
     assert not alert[~eligible].any()
+
+
+def test_isolation_forest_alert_raises_on_non_finite_score(cfg, monkeypatch):
+    import features
+
+    tiny = _tiny_if_cfg(cfg)
+    rng = np.random.default_rng(6)
+    cols = list(features.feature_columns(cfg))
+    n_fit = 32
+    X_train = rng.standard_normal((n_fit, len(cols)))
+    train_frame = features.FeatureFrame(
+        np.arange(n_fit, dtype=np.int64) * 10,
+        {c: X_train[:, i] for i, c in enumerate(cols)},
+        np.full(n_fit, "", dtype=object), np.ones(n_fit, dtype=bool), {"split": "train"})
+    fs = features.fit_scaler([train_frame], tiny)
+    X = np.column_stack([X_train[:, cols.index(c)] for c in fs.columns])
+    model = model_lib.fit_isolation_forest(X, tiny)
+
+    n_test = 3
+    test_vals = rng.standard_normal((n_test, len(cols)))
+    eligible = np.array([True, True, True])
+    test_frame = features.FeatureFrame(
+        np.arange(n_test, dtype=np.int64) * 10,
+        {c: test_vals[:, i] for i, c in enumerate(cols)},
+        np.full(n_test, "", dtype=object), eligible, {"split": "test"})
+
+    monkeypatch.setattr(model_lib, "anomaly_scores",
+                        lambda model, X: np.array([1.0, np.nan, 2.0]))
+    with pytest.raises(model_lib.NonFiniteEligibleInputError):
+        model_lib.isolation_forest_alert(test_frame, fs, model, threshold=0.5)

@@ -73,6 +73,19 @@ def test_run_monitoring_notes_insufficient_baseline_instead_of_crashing(con, cfg
     assert "eligible windows" in summary["model_note"]
 
 
+def test_run_monitoring_never_alerts_on_the_baseline_fitting_window(con, cfg):
+    """Astra freeze-review MUST-FIX 5 (2026-09-28): a spike planted INSIDE
+    the model baseline's own warm-up/fitting slice must never surface as a
+    model alert - those windows' scores are retrospective, not causal."""
+    from monitoring.alert_log import run_monitoring
+
+    frame = _frame_with_spike(cfg, n=80, spike_at=10)
+    summary = run_monitoring(con, "LINE_A.FILLER", frame, cfg, rule_min_history=30,
+                             model_warmup_windows=50)
+    assert summary["model_alerts"] == 0
+    assert summary["model_retrospective_windows"] == 50
+
+
 def test_recent_alerts_filters_by_machine(con, cfg):
     from monitoring.alert_log import recent_alerts, run_monitoring
 

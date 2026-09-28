@@ -23,6 +23,8 @@ run() is the single entry point:
 """
 from __future__ import annotations
 
+from pathlib import Path
+
 import numpy as np
 
 from runner import lock_guard, models as model_lib
@@ -30,7 +32,7 @@ from runner import lock_guard, models as model_lib
 import evaluator
 import features as feat
 import generator
-from twin_config import load_config
+import twin_config
 
 
 def _cand_summary(pooled: dict) -> dict:
@@ -46,10 +48,23 @@ def _score_asset(frame, alert, labels, split, asset, events, cfg) -> dict:
     return evaluator.score_stratum(inp, events, cfg)
 
 
-def run(table_name: str = "dev", *, allow_locked: bool = False,
-        cfg: dict | None = None, repo_root=None) -> dict:
-    lock = lock_guard.require_lock(repo_root)
-    cfg = cfg or load_config()
+def run(table_name: str = "dev", *, allow_locked: bool = False, repo_root=None) -> dict:
+    """No `cfg` parameter: a caller-supplied cfg dict could disagree with
+    the one require_lock() just verified on disk (Astra freeze-review
+    MUST-FIX 1, 2026-09-28 - a probe reached generation with an unverified
+    contamination=0.4 this way). The runtime config is always the exact
+    file require_lock() re-hashed, loaded from the same resolved root."""
+    root = Path(repo_root).resolve() if repo_root is not None else lock_guard.REPO_ROOT
+    lock = lock_guard.require_lock(root)
+    lock_guard.require_import_paths(root, {
+        "src/generator.py": generator,
+        "src/features.py": feat,
+        "src/evaluator.py": evaluator,
+        "src/twin_config.py": twin_config,
+    })
+    if allow_locked:
+        lock_guard.require_clean_worktree(root)
+    cfg = twin_config.load_config(root / "config.yaml")
     sensors = cfg["sensors"]["order"]
 
     ds = generator.generate(table_name, allow_locked=allow_locked, cfg=cfg)
@@ -83,8 +98,14 @@ def run(table_name: str = "dev", *, allow_locked: bool = False,
         static_candidates.append({"candidate_id": f"static_k{k}", "strictness": float(k),
                                   **_cand_summary(pooled)})
     static_selection = evaluator.select_candidate(static_candidates, cfg)
+    static_selected = static_selection["selected"]
     k_by_candidate = {f"static_k{k}": k for k in k_grid}
-    chosen_k = k_by_candidate.get(static_selection["selected"])
+    # A selected candidate_id of "no_alert" is evaluator.select_candidate's
+    # own valid choice (best F1 among within-cap candidates), never "no
+    # candidate met the cap" (selected is None then) - the two must not
+    # collapse to the same chosen_k=None (Astra freeze-review MUST-FIX 3,
+    # 2026-09-28: that dropped the model's whole test row).
+    chosen_k = k_by_candidate.get(static_selected) if static_selected != "no_alert" else None
 
     if_candidates = []
     for q, thr in if_thresholds.items():
@@ -93,8 +114,9 @@ def run(table_name: str = "dev", *, allow_locked: bool = False,
         if_candidates.append({"candidate_id": f"if_q{q}", "strictness": float(thr),
                               **_cand_summary(pooled)})
     if_selection = evaluator.select_candidate(if_candidates, cfg)
+    if_selected = if_selection["selected"]
     thr_by_candidate = {f"if_q{q}": thr for q, thr in if_thresholds.items()}
-    chosen_if_threshold = thr_by_candidate.get(if_selection["selected"])
+    chosen_if_threshold = thr_by_candidate.get(if_selected) if if_selected != "no_alert" else None
 
     validation_baselines = {
         "no_alert": _validation_pooled(lambda fr: evaluator.no_alert(fr.eligible)),
@@ -110,10 +132,18 @@ def run(table_name: str = "dev", *, allow_locked: bool = False,
             "always_alert": _score_asset(frame, evaluator.always_alert(frame.eligible),
                                          ds.labels, "test", asset, events, cfg),
         }
-        if chosen_k is not None:
+        # A "no_alert" selection is a real, protocol-valid policy for that
+        # model - it must still get its own test row (identical to the
+        # no_alert baseline's own numbers, since that is exactly what was
+        # selected), not be silently omitted as if the model had none.
+        if static_selected == "no_alert":
+            stratum["static_threshold"] = stratum["no_alert"]
+        elif chosen_k is not None:
             alert = model_lib.static_threshold_alert(frame, sensor_mean_std, chosen_k, sensors)
             stratum["static_threshold"] = _score_asset(frame, alert, ds.labels, "test", asset, events, cfg)
-        if chosen_if_threshold is not None:
+        if if_selected == "no_alert":
+            stratum["isolation_forest"] = stratum["no_alert"]
+        elif chosen_if_threshold is not None:
             alert = model_lib.isolation_forest_alert(frame, fs, if_model, chosen_if_threshold)
             stratum["isolation_forest"] = _score_asset(frame, alert, ds.labels, "test", asset, events, cfg)
         test_results[asset] = stratum

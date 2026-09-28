@@ -1,15 +1,21 @@
 """Operational IsolationForest baseline (NOT a locked file; NOT the frozen
 protocol's train/validation/test selection - see monitoring/__init__.py).
 
-Fits a scaler + IsolationForest ONCE on a fixed, causal warm-up slice (the
-first `warmup_windows` eligible windows, in time order) of one asset's own
-feature history, then scores every eligible window - including the warm-up
-slice itself - against that fixed baseline. IsolationForest's parameters,
-including contamination, are taken as-is from config.yaml
-`models.isolation_forest.params` and never tuned here; the alert threshold
-is the strictest train-score quantile in config.yaml's frozen candidate
-grid, not a validation-selected one (there is no validation split in a live
-operational baseline).
+Fits a scaler + IsolationForest ONCE on a fixed warm-up slice (the first
+`warmup_windows` eligible windows, in time order) of one asset's own
+feature history, then scores every eligible window against that fixed
+baseline - including the warm-up slice itself, whose own scores are
+NON-causal (in-sample/retrospective): each of those windows' fitted score
+depends on later warm-up samples used to fit the very model scoring it, so
+it is not a claim about what the baseline would have alerted on at the
+time. `score_frame` marks those windows non-causal and never alerts on
+them (Astra freeze-review MUST-FIX 5, 2026-09-28); their scores are still
+returned for visibility, just excluded from causal alert/performance
+claims. IsolationForest's parameters, including contamination, are taken
+as-is from config.yaml `models.isolation_forest.params` and never tuned
+here; the alert threshold is the strictest train-score quantile in
+config.yaml's frozen candidate grid, not a validation-selected one (there
+is no validation split in a live operational baseline).
 """
 from __future__ import annotations
 
@@ -57,14 +63,21 @@ def fit_baseline(frame, cfg: dict, warmup_windows: int = 180) -> dict:
     tc = cfg["models"]["isolation_forest"]["threshold_candidates"]
     thr_q = tc["quantiles"][-1]     # strictest candidate: fewest baseline false alerts
     threshold = float(np.quantile(train_scores, thr_q, method=tc["quantile_method"]))
+    fit_window_starts = frozenset(int(x) for x in frame.window_start[warm_mask])
     return {"scaler": scaler, "keep_columns": keep, "model": model, "threshold": threshold,
-           "threshold_quantile": thr_q, "warmup_windows": warmup_windows}
+           "threshold_quantile": thr_q, "warmup_windows": warmup_windows,
+           "fit_window_starts": fit_window_starts}
 
 
 def score_frame(frame, baseline: dict, cfg: dict):
     """Score every eligible window of `frame` against a fixed fitted
-    baseline (fit_baseline()'s return dict). Returns (alert, scores): bool
-    and float arrays the length of `frame`; scores is NaN where ineligible."""
+    baseline (fit_baseline()'s return dict). Returns (alert, scores,
+    causal): bool, float and bool arrays the length of `frame`; scores is
+    NaN where ineligible. `causal` is False for ineligible windows AND for
+    the exact windows baseline was fit on (fit_baseline's warm-up slice,
+    identified by window_start) - those scores are in-sample/retrospective,
+    not a causal judgement, and `alert` never fires on a non-causal
+    window."""
     from features import to_matrix
 
     eligible = np.asarray(frame.eligible, dtype=bool)
@@ -74,7 +87,10 @@ def score_frame(frame, baseline: dict, cfg: dict):
         X = to_matrix(frame, baseline["keep_columns"])
         Xs = baseline["scaler"].transform(X)
         scores[eligible] = -baseline["model"].score_samples(Xs)
+    fit_starts = baseline["fit_window_starts"]
+    in_fit_window = np.array([int(ws) in fit_starts for ws in frame.window_start], dtype=bool)
+    causal = eligible & ~in_fit_window
     with np.errstate(invalid="ignore"):
         beyond = scores > baseline["threshold"]
-    alert = np.where(np.isfinite(scores), beyond, False) & eligible
-    return alert, scores
+    alert = np.where(np.isfinite(scores), beyond, False) & causal
+    return alert, scores, causal

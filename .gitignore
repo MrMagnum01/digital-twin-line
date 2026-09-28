@@ -5,6 +5,8 @@ __pycache__/
 .pytest_cache/
 # generated data / results - never committed (dev-seed output only, locally)
 out/
+# runner.cli's own exclusive per-run artifacts (default --run-dir target)
+runs/
 *.duckdb
 *.duckdb.wal
 *.npz
