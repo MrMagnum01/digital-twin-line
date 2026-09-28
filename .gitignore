@@ -1,0 +1,14 @@
+# local environments and caches
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+# generated data / results - never committed (dev-seed output only, locally)
+out/
+*.duckdb
+*.duckdb.wal
+*.npz
+*.csv
+*.parquet
+# schema is source, not data (overrides any broader *.sql ignore)
+!src/schema.sql

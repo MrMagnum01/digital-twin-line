@@ -1,0 +1,31 @@
+# Complete direct + transitive lock with sha256 of the exact wheel installed.
+# Platform: CPython 3.13, manylinux x86_64 (wheels only). Install with:
+#   pip install --require-hashes --only-binary=:all: -r requirements.lock
+cloudpickle==3.1.2 \
+    --hash=sha256:9acb47f6afd73f60dc1df93bb801b472f05ff42fa6c84167d25cb206be1fbf4a
+duckdb==1.5.5 \
+    --hash=sha256:078e6a60dd8eedde5832f45422ca5c4a6b8c837aeabd8a56ca0b7d933f588053
+iniconfig==2.3.0 \
+    --hash=sha256:f631c04d2c48c52b84d0d0549c99ff3859c98df65b3101406327ecc7d53fbf12
+joblib==1.6.0 \
+    --hash=sha256:3dbbf9f6e4b592a2357b854608e980fe6390d131d7a82f011a377ef2ebef7aba
+narwhals==2.26.0 \
+    --hash=sha256:29326d74f107c347fd1009bd58e38d9f7c7c5b51e6de97bc93dbc325d9038b54
+numpy==2.5.3 \
+    --hash=sha256:a5fa86b80fd24bcd1aff83ad23be44ea323de3f787be8f8b15d4a65621e25321
+packaging==26.3 \
+    --hash=sha256:d7193f7c8e4e93f444fde0262bf90af30e16fa0ad0ad44cb553c87339b23cd1c
+pluggy==1.6.0 \
+    --hash=sha256:e920276dd6813095e9377c0bc5566d94c932c33b27a3e3945d8389c374dd4746
+Pygments==2.21.0 \
+    --hash=sha256:2363c69b61c4a97c838da3b130dcd6468f4848992b21a82f2a63ec34377137d9
+pytest==9.1.1 \
+    --hash=sha256:37a86b45efb9a47a61a36449063e8e18d0cab3161329fc099eb21783169c4f0c
+PyYAML==6.0.3 \
+    --hash=sha256:0f29edc409a6392443abf94b9cf89ce99889a1dd5376d94316ae5145dfedd5d6
+scikit-learn==1.9.1 \
+    --hash=sha256:55e79d6e9b0923f1a978179822bd43d7f5543f45e970a00fe861f43486380aba
+scipy==1.18.1 \
+    --hash=sha256:fdaf5ea890a6183d0565f51a61799d67081bd5b1cf03c5f4b3fd3732108625c9
+threadpoolctl==3.7.0 \
+    --hash=sha256:cd8b60b5641b45c67bbf73c64c843235fc2d8a480c87389f52f5dbee893b86be

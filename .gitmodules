@@ -1,0 +1,3 @@
+[submodule "vendor/plant-shift-oee-report"]
+	path = vendor/plant-shift-oee-report
+	url = https://github.com/MrMagnum01/plant-shift-oee-report.git
