@@ -1,11 +1,16 @@
 # Digital-twin line: predictive-maintenance experiment lock (synthetic demo)
 
-**Role:** Synthetic portfolio demonstration, implemented with AI coding agents; independent review pending. No client data or client work.
+**Role:** Synthetic portfolio demonstration, implemented with AI coding agents. No client data or client work.
 
-> **This commit is a LOCK ONLY.** No evaluation has been run. No model has been fitted. No threshold has been chosen. No results exist.
-> No data has been generated from the locked seeds (101-110 / 201-204 / 301-306).
-> The code was exercised only on separate **development** seeds (901-906) and on hand-built fixtures.
-> The independent reviewer has **not yet** signed off the experiment freeze. Until that sign-off, the main test is not frozen and nothing may be generated on the locked seeds.
+**Independent review:** the company's separate AI reviewer cleared the experiment freeze (lock-3), the runner at commit c654237, and the integrity of the one retained locked evaluation. That scope is bounded: synthetic data only, and no performance or real-world claim. Later commits are not covered by that review.
+
+## Result of the one locked evaluation (measured, synthetic, 9 events per stratum)
+
+> Under a frozen synthetic evaluation, Isolation Forest did not improve on the always-alert baseline. The static rule detected more events on the seen asset, but at substantially more false alerts. On the unseen asset, the methods had the same event-level score, with only dropout events matched. Isolation Forest was active for about 99.9% of eligible operating time. These nine-event-per-stratum results demonstrate the evaluation workflow, not a useful anomaly detector or real-world performance.
+
+The run is one-shot and reserved, and will not be rerun or tuned. The retained artifacts (pre_run, selection and evaluation) and their hashes are held in the company record.
+
+> **History.** The experiment was frozen (lock-3) and signed off before any evaluation existed. All development used separate **development** seeds (901-906) and hand-built fixtures. The locked seeds (101-110 / 201-204 / 301-306) were used exactly once, by the reviewed runner, for the evaluation above.
 
 This repo freezes the machinery for a synthetic predictive-maintenance
 experiment on a fictional packaging line, before any evaluation trace exists.
@@ -40,11 +45,10 @@ Any measured number that comes out of this machinery later will hold **on this s
 
 ## Model runner, dashboard and monitoring (this milestone)
 
-> **Still a lock-only milestone for locked-seed purposes.** `runner/` is built
-> and tested (development seeds and hand-built fixtures only) for Astra's
-> runner review. **No locked-seed evaluation has been run.** `generator.generate("locked", ...)`
-> still refuses unless a caller explicitly passes `allow_locked=True`, and
-> nothing in `runner/`, `dashboard/` or `monitoring/` does. `dashboard/` and
+> `runner/` passed the independent runner review at c654237. It then ran the one
+> locked evaluation (result above). The reservation is consumed, so a second locked
+> run is refused. `generator.generate("locked", ...)` still refuses unless a caller
+> explicitly passes `allow_locked=True`; only the reviewed CLI path does that. `dashboard/` and
 > `monitoring/` are demo/operational code, not the frozen evaluation, and
 > make no locked-evaluation or performance claim anywhere (see "What this
 > demo does not claim").
@@ -403,11 +407,11 @@ replacement from a split-level seed:
 
 ## Open items and deviations (flagged, not decided here)
 
-- **Bundled non-OSI sub-components.** The numpy and scipy wheels vendor a few permissive but non-OSI-listed components: a CC0 file in numpy, and Qhull in scipy. See `LICENSES.md`. scikit-learn is required by the protocol and depends on both. The CEO/reviewer needs to decide.
+- **Bundled non-OSI sub-components.** The numpy and scipy wheels vendor a few permissive but non-OSI-listed components: a CC0 file in numpy, and Qhull in scipy. See `LICENSES.md`. scikit-learn is required by the protocol and depends on both. They are covered by the company's enumerated licence exception (see `LICENSES.md`).
 - **Always-alert scope.** The baseline covers every eligible window, including planned stops. It does not cover "operating time" only, because a constant detector has no schedule input. Its planned-stop alarms are reported separately.
 - **Selection objective.** Event F1 is computed over all planted events, equipment and data together, with the two validation assets pooled. The protocol does not say whether data faults count toward selection, so this choice is frozen here and open to review.
 - **Dependency lock scope.** The lock is platform-specific: CPython 3.13 on manylinux x86_64.
-- **Runner pending review.** `runner/` is built and self-tested (development seeds and hand-built fixtures only) but has not yet had Astra's runner review; no locked-seed evaluation may be run before that review, per the lock-3 sign-off's own "Next step".
+- **One evaluation, not a benchmark.** The locked evaluation ran once. With nine events per stratum it supports no significance or generalisation claim.
 - **Monitoring is not the frozen evaluation.** `monitoring/`'s rule and model baselines use a live per-machine operational fit (an expanding history / a fixed causal warm-up slice), not the protocol's train/validation/test split, and are not validation-selected. No number from `monitoring/` or `dashboard/` is a locked-evaluation result.
 
 ## What this demo does not claim

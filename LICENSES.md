@@ -77,7 +77,7 @@ OSI-approved; none is paid or closed-source.
 Not hash-locked like `requirements.lock` (see `dashboard/requirements.txt`'s
 own header for why); version-pinned only.
 
-## Bundled components inside binary wheels (flagged, decision pending)
+## Bundled components inside binary wheels (covered by the licence exception below)
 
 The numpy, scipy and scikit-learn **wheels** vendor third-party code whose
 licences are declared in their `*.dist-info/licenses` / `LICENSE.txt`. Most
@@ -100,3 +100,22 @@ sub-components as well as the packages is a decision for the CEO/reviewer.
 It is recorded here, not decided here.
 
 No paid or closed-source dependency is used anywhere in this repository.
+
+## Licence exception (company decision `20-decisions/2026-09-28-licence-exception-wheel-bundled-components.md`)
+
+Accepted 2026-09-28, CEO by delegation, with Astra concurring (vault 9fd116d §2); the CEO may still veto. This is a
+standing, **enumerated** exception to the company's OSI-only rule, and it covers only the components listed below, in
+the pinned wheels named. It does not declare these licences OSI-approved.
+
+This repository does **not** vendor or redistribute any of these wheels: users install them from PyPI via
+`requirements*.txt`. Bundled notices stay exactly as shipped inside each wheel, unmodified. Where screenshots or
+charts render a bundled font, the font licence permits using it to produce documents and images.
+
+| Component | Package / version | File(s) in the wheel | Licence | Licence text / source | Option chosen | Obligations |
+|---|---|---|---|---|---|---|
+| Highway random-inl.h | numpy 2.5.3 | `hwy/contrib/random/random-inl.h` (compiled into numpy) | CC0-1.0 | `numpy-2.5.3.dist-info/licenses/numpy/_core/src/highway/LICENSE` | n/a | none (public-domain dedication); notice kept |
+| Reference LAPACK (via OpenBLAS) | numpy 2.5.3, scipy 1.18.1 | compiled into the bundled OpenBLAS | BSD-3-Clause-Open-MPI | `numpy-2.5.3.dist-info/licenses/LICENSE.txt`, `scipy-1.18.1.dist-info/LICENSE.txt` | n/a | keep copyright and licence notice (as shipped) |
+| Qhull | scipy 1.18.1 | `scipy/spatial/qhull_src/COPYING_QHULL.txt` (compiled `_qhull`) | Qhull licence | that file | n/a | keep notice; modified versions must be marked (we modify nothing) |
+| DOP853 | scipy 1.18.1 | `scipy/integrate/LICENSE_DOP` | BSD-style (Hairer) | that file | n/a | keep notice |
+
+The twin's cover chart is rendered with matplotlib in the vault tooling, not by this repository, which does not depend on matplotlib.
