@@ -390,3 +390,33 @@ def test_dev_seed_wiring_with_trivial_baselines(dev_ds):
             else:
                 # one continuous episode per eligible run: it cannot be reused
                 assert e["tp"] <= e["episodes"] and e["alert_active_fraction_operating"] == 1.0
+
+
+# ---- Astra lock-r2 (40-sessions/2026-09-28-astra-twin-lock-r2.md): no bool coercion, exact 1-D shapes ----------
+def _r2_frame():
+    from types import SimpleNamespace
+    return (SimpleNamespace(window_start=np.array([0, 10, 20]), eligible=np.ones(3, dtype=bool),
+                            dq_reason=np.array(["", "", ""], dtype=object)),
+            SimpleNamespace(planned_stops=[], normal_changes=[]))
+
+
+def test_nan_prediction_is_refused_not_coerced_to_true():
+    frame, labels = _r2_frame()
+    s = E.stratum_input(frame, np.array([np.nan, 0.0, 0.0]), labels, "dev", "FILLER")
+    with pytest.raises(E.InputError):
+        E.score_all([s], [], {"dev": (0, 30)})
+
+
+def test_two_dimensional_dq_reason_is_refused():
+    frame, labels = _r2_frame()
+    s = E.stratum_input(frame, np.zeros(3, dtype=bool), labels, "dev", "FILLER")
+    s.dq_reason = np.array([[""], [""], [""]], dtype=object)
+    with pytest.raises(E.InputError):
+        E.score_all([s], [], {"dev": (0, 30)})
+
+
+def test_two_dimensional_alert_is_refused():
+    frame, labels = _r2_frame()
+    s = E.stratum_input(frame, np.zeros((3, 1), dtype=bool), labels, "dev", "FILLER")
+    with pytest.raises(E.InputError):
+        E.score_all([s], [], {"dev": (0, 30)})

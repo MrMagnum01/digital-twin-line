@@ -207,12 +207,18 @@ def score_stratum(inp: StratumInput, events: list[Event], cfg: dict | None = Non
     if alert_raw.dtype != np.bool_:
         raise InputError(f"alert must be a bool-dtype array, got {alert_raw.dtype}")
     elig, alert = elig_raw, alert_raw
+    if elig.ndim != 1 or alert.ndim != 1:
+        raise InputError("eligible and alert must be exact 1-D arrays")
     if not (len(ws) == len(elig) == len(alert)):
         raise InputError("window_start/eligible/alert lengths differ")
     if np.any(alert & ~elig):
         raise InputError("alert on an ineligible window: no score exists there")
-    if inp.dq_reason is not None and len(np.asarray(inp.dq_reason)) != len(ws):
-        raise InputError("dq_reason length differs from window_start")
+    if inp.dq_reason is not None:
+        _dq = np.asarray(inp.dq_reason, dtype=object)
+        if _dq.ndim != 1:
+            raise InputError("dq_reason must be an exact 1-D array")
+        if len(_dq) != len(ws):
+            raise InputError("dq_reason length differs from window_start")
     reason = (np.asarray(inp.dq_reason, dtype=object) if inp.dq_reason is not None
               else np.where(elig, "", "excluded").astype(object))
     evs = [e for e in events if e.split == inp.split and e.asset == inp.asset]
@@ -375,7 +381,9 @@ def stratum_input(frame, alert: np.ndarray, labels, split: str, asset: str) -> S
              if p["split"] == split and p["asset"] == asset]
     changes = [(c["start"], c["end"]) for c in labels.normal_changes
                if c["split"] == split and c["asset"] == asset]
-    return StratumInput(split, asset, frame.window_start, frame.eligible, np.asarray(alert, dtype=bool),
+    # Do not coerce: a float/NaN alert vector must reach score-time validation as-is and be refused there
+    # (Astra lock-r2: [NaN,0,0] must never become [True,False,False]).
+    return StratumInput(split, asset, frame.window_start, frame.eligible, np.asarray(alert),
                         dq_reason=frame.dq_reason, planned_stops=stops, normal_changes=changes)
 
 
