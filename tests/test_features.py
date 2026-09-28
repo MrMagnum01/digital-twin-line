@@ -184,13 +184,42 @@ def test_complete_dropout_stays_in_denominator():
     k = np.arange(a // 10, b // 10)
     for s in ("vibration_rms", "line_pressure_bar"):
         assert (fr.columns[f"{s}__missing_frac_10s"][k] == 1.0).all()
-    inel = fr.dq_reason == "insufficient_observations"
-    assert inel[k[-1]] and not fr.eligible[k[-1]]
+    # every window of a COMPLETE (all-sensor) dropout is ineligible - never
+    # healthy on stale rolling history - for its whole duration, not only
+    # once the rolling window itself runs dry (Astra MUST-FIX 1)
+    assert not fr.eligible[k].any()
+    assert (fr.dq_reason[k] == "all_sensors_missing").all()
     rep = F.excluded_report(fr)
-    assert rep["excluded"]["insufficient_observations"]["windows"] == int(inel.sum()) > 0
+    assert rep["excluded"]["all_sensors_missing"]["windows"] == len(k)
     assert rep["observed_sample_fraction"] < 1.0
     # missing values are never imputed to a "healthy" number
     assert np.isnan(fr.columns["vibration_rms__mean_5m"][k[-1]])
+
+
+# --------------------------- current-window health (Astra MUST-FIX 1) -----
+# Wired in from vault:40-sessions/2026-09-28-astra-twin-lock-probes.py: a
+# complete current-window dropout must never be reported healthy on stale
+# rolling history.
+def test_complete_all_sensor_dropout_is_ineligible(cfg):
+    x = {s: np.ones(3600) for s in cfg["sensors"]["order"]}
+    for a in x.values():
+        a[2400:2520] = np.nan
+    fr = F.compute_features(g.SensorReadings(0, x), 0, 3600, split_name="dev")
+    i = (fr.window_start >= 2400) & (fr.window_start < 2520)
+    assert int(i.sum()) == 12
+    assert not fr.eligible[i].any()
+    assert set(fr.dq_reason[i].tolist()) == {"all_sensors_missing"}
+
+
+def test_partial_sensor_dropout_is_ineligible(cfg):
+    x = {s: np.ones(3600) for s in cfg["sensors"]["order"]}
+    sensors = cfg["sensors"]["order"]
+    x[sensors[0]][2400:2520] = np.nan          # only one of four sensors goes dark
+    fr = F.compute_features(g.SensorReadings(0, x), 0, 3600, split_name="dev")
+    i = (fr.window_start >= 2400) & (fr.window_start < 2520)
+    assert int(i.sum()) == 12
+    assert not fr.eligible[i].any()
+    assert set(fr.dq_reason[i].tolist()) == {"partial_sensor_missing"}
 
 
 def test_non_finite_input_is_labelled():

@@ -22,6 +22,20 @@ No imputation. The first 30 minutes of every split are ineligible (warm_up).
 Ineligible windows are never "healthy": they carry a labelled dq_reason and
 are reported separately by excluded_report().
 
+Current-window health (frozen): the rolling 5m/30m statistics can stay
+finite from OLDER samples while the window's OWN 10 s block is currently
+blind, so eligibility also depends on this window's own per-sensor sample
+count, not only the rolling counts - a live sensor dropout can never be
+reported healthy on stale history. Per window: total loss (every sensor has
+zero finite samples in this 10 s block) -> ineligible, dq_reason
+"all_sensors_missing". Partial loss (at least one, but not all, sensors have
+zero finite samples in this 10 s block) -> ineligible, dq_reason
+"partial_sensor_missing" ("missing sensor data must never render healthy
+green" applies whether one sensor or all are currently blind). dq_reason
+priority when more than one condition holds for the same window (highest
+wins): warm_up > all_sensors_missing > partial_sensor_missing >
+non_finite_input > insufficient_observations.
+
 Computation is exact-per-window: 10 s block statistics (count, mean, centred
 second moments of value and time, co-moment) are combined over the window's
 blocks with the parallel (Chan et al.) update. Each window's value depends
@@ -160,11 +174,13 @@ def compute_features(readings: SensorReadings, split_start: int, split_end: int,
     cols: dict = {}
     insufficient = np.zeros(n_win, dtype=bool)
     nonfinite = np.zeros(n_win, dtype=bool)
+    cur_sensor_missing = np.zeros(n_win, dtype=np.int64)   # sensors with 0 finite samples THIS 10s block
     finite_total = 0
     for s in sensors:
         x = np.asarray(readings.values[s], dtype=np.float64)
         st = _block_stats(x, bs)
         finite_total += int(st[0].sum())
+        cur_sensor_missing += (st[0] == 0)
         rolled = {}
         for w, W in f["rolling_windows_s"].items():
             K = W // bs
@@ -191,9 +207,14 @@ def compute_features(readings: SensorReadings, split_start: int, split_end: int,
     assert_no_leak(ordered.keys(), cfg)
 
     warm_end = split_start + cfg["generator"]["warmup_minutes"] * 60
+    n_sensors = len(sensors)
+    all_sensors_missing = cur_sensor_missing == n_sensors
+    partial_sensor_missing = (cur_sensor_missing > 0) & ~all_sensors_missing
     reason = np.full(n_win, "", dtype=object)
     reason[insufficient] = "insufficient_observations"
     reason[nonfinite] = "non_finite_input"
+    reason[partial_sensor_missing] = "partial_sensor_missing"
+    reason[all_sensors_missing] = "all_sensors_missing"
     reason[window_start < warm_end] = "warm_up"
     eligible = reason == ""
     meta = {"split": split_name, "split_start": split_start, "split_end": split_end,

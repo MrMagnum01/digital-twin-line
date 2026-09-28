@@ -10,7 +10,7 @@
 # (original draft + its binding amendments dated 2026-09-27; the amendments
 # govern where they narrow or override the draft).
 
-version: "lock-1"
+version: "lock-2"
 
 plant_ingest_reference:
   repo: "see .gitmodules (submodule url)"
@@ -285,8 +285,19 @@ features:
     denominator: "declared_grid_seconds"
   # Data-quality outcomes (a window with any of these is ineligible for
   # scoring, is never counted as a healthy/negative window, and is reported
-  # in the excluded-window table with its reason):
-  dq_reasons: [warm_up, non_finite_input, insufficient_observations]
+  # in the excluded-window table with its reason). all_sensors_missing and
+  # partial_sensor_missing are the CURRENT-window health outcome (this
+  # window's own 10 s block, per sensor), frozen because the rolling 5m/30m
+  # statistics can stay finite from older samples while the current block is
+  # blind - a live sensor/comms dropout must never be reported healthy on
+  # stale history. all_sensors_missing = every sensor has zero finite
+  # samples in this window's own 10 s block (e.g. a whole-asset comms
+  # dropout). partial_sensor_missing = at least one, but not all, sensors
+  # have zero finite samples in this window's own 10 s block. Reason
+  # priority (highest wins when more than one applies to the same window):
+  # warm_up > all_sensors_missing > partial_sensor_missing >
+  # non_finite_input > insufficient_observations.
+  dq_reasons: [warm_up, non_finite_input, insufficient_observations, partial_sensor_missing, all_sensors_missing]
   imputation: "none"           # no imputed values; ineligible windows are excluded and reported
   imputation_constants: {}
   # Scaler: fitted on TRAIN eligible windows only, all train assets together.
@@ -345,10 +356,21 @@ models:
   no_alert_baseline: {}
   always_alert_baseline: {}
   static_threshold:
-    # Per-sensor static threshold on the scaled feature matrix: a window
-    # alerts if ANY eligible (non-dropped) feature's |z| > k, where z is the
-    # train-fitted RobustScaler output. Same eligible windows as IsolationForest.
-    aggregation_rule: "any_feature_abs_scaled_gt_k"
+    # Protocol baseline (frozen-ml-protocol.md): "a per-sensor static
+    # threshold at mean +/- k*sigma from train, k chosen on validation".
+    # Computed directly on each sensor's {sensor}__mean_5m feature (raw
+    # sensor units), NOT on the RobustScaler-scaled matrix IsolationForest
+    # uses - a materially different baseline with different units, which is
+    # not this model. Train mean/std are the population (ddof=0) mean and
+    # std of {sensor}__mean_5m over TRAIN eligible windows (same eligibility
+    # as the scaler fit). A window alerts if, for ANY sensor, its
+    # {sensor}__mean_5m lies outside [train_mean - k*train_std,
+    # train_mean + k*train_std]. Same eligible input windows as
+    # IsolationForest. k is chosen on validation from k_grid by the same
+    # selection_objective/tie_break_order as IsolationForest's threshold.
+    aggregation_rule: "any_sensor_mean_5m_outside_train_mean_pm_k_std"
+    feature: "mean_5m"
+    fit_on: "train eligible windows only (after warm-up), no schedule/label filtering; train faults are NOT cleaned out"
     k_grid: [1, 2, 3, 4, 5, 6]
     strictness: "larger k is stricter"
   isolation_forest:

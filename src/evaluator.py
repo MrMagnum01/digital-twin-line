@@ -13,6 +13,17 @@ Inputs per stratum (one split x one asset), StratumInput:
   planned_stops  [(start, end)] non-operating intervals (label channel)
   normal_changes [(start, end)] unseen-normal-change intervals (label channel)
 
+Input validation (frozen): window_start must be a non-empty, strictly
+increasing, integer-dtype grid with a constant step of exactly
+features.window_s - no missing, duplicate or misaligned steps - and (when
+scored through score_all) must exactly span its declared split's [start,
+end) bounds, endpoint to endpoint. eligible/alert must be bool-dtype arrays
+of the same length as window_start; dq_reason, when given, likewise.
+Malformed input is refused (InputError), never coerced into an apparently
+valid score. point_level coverage = eligible windows / len(window_start);
+once the grid is validated complete, this is coverage over the split's
+actual declared grid, never 1.0 on a broken one.
+
 Event level (per stratum; see config for exact definitions):
   * alert time of a window = its end; episodes = runs of alert windows with
     gap (next window start - previous window end) <= debounce_gap_s; never
@@ -169,17 +180,39 @@ def _prf(tp, fp, fn):
 # ---------------------------------------------------------------------------
 # Stratum scoring
 # ---------------------------------------------------------------------------
+def _validate_grid(ws: np.ndarray, bs: int) -> None:
+    if ws.ndim != 1:
+        raise InputError("window_start must be a 1-D array")
+    if not np.issubdtype(ws.dtype, np.integer):
+        raise InputError(f"window_start must be an integer dtype, got {ws.dtype}")
+    if len(ws) == 0:
+        raise InputError("stratum has no declared windows: refusing to score an empty grid")
+    expected = ws[0] + bs * np.arange(len(ws), dtype=np.int64)
+    if not np.array_equal(ws, expected):
+        raise InputError("window_start is not a complete, unique, strictly increasing grid "
+                          f"with a constant step of {bs}s: refusing to coerce a broken grid")
+
+
 def score_stratum(inp: StratumInput, events: list[Event], cfg: dict | None = None) -> dict:
     cfg = _cfg(cfg)
     bs = cfg["features"]["window_s"]
     tail = cfg["scoring"]["scoring_tail_s"]
-    ws = np.asarray(inp.window_start, dtype=np.int64)
-    elig = np.asarray(inp.eligible, dtype=bool)
-    alert = np.asarray(inp.alert, dtype=bool)
+    ws = np.asarray(inp.window_start)
+    _validate_grid(ws, bs)
+    ws = ws.astype(np.int64)
+    elig_raw = np.asarray(inp.eligible)
+    alert_raw = np.asarray(inp.alert)
+    if elig_raw.dtype != np.bool_:
+        raise InputError(f"eligible must be a bool-dtype array, got {elig_raw.dtype}")
+    if alert_raw.dtype != np.bool_:
+        raise InputError(f"alert must be a bool-dtype array, got {alert_raw.dtype}")
+    elig, alert = elig_raw, alert_raw
     if not (len(ws) == len(elig) == len(alert)):
         raise InputError("window_start/eligible/alert lengths differ")
     if np.any(alert & ~elig):
         raise InputError("alert on an ineligible window: no score exists there")
+    if inp.dq_reason is not None and len(np.asarray(inp.dq_reason)) != len(ws):
+        raise InputError("dq_reason length differs from window_start")
     reason = (np.asarray(inp.dq_reason, dtype=object) if inp.dq_reason is not None
               else np.where(elig, "", "excluded").astype(object))
     evs = [e for e in events if e.split == inp.split and e.asset == inp.asset]
@@ -290,6 +323,7 @@ def score_all(strata: list[StratumInput], events: list[Event], split_ranges: dic
     outside their split, events not covered by any stratum, and duplicate
     strata. Never pools strata."""
     cfg = _cfg(cfg)
+    bs = cfg["features"]["window_s"]
     validate_splits(split_ranges)
     seen = set()
     for s in strata:
@@ -300,8 +334,9 @@ def score_all(strata: list[StratumInput], events: list[Event], split_ranges: dic
         seen.add((s.split, s.asset))
         lo, hi = split_ranges[s.split]
         ws = np.asarray(s.window_start)
-        if len(ws) and (ws.min() < lo or ws.max() + cfg["features"]["window_s"] > hi):
-            raise InputError(f"stratum {s.split}/{s.asset} has windows outside its split")
+        if len(ws) == 0 or ws.min() != lo or ws.max() + bs != hi:
+            raise InputError(f"stratum {s.split}/{s.asset} window_start does not exactly span "
+                             f"its declared split bounds [{lo}, {hi})")
     for e in events:
         if (e.split, e.asset) not in seen:
             raise InputError(f"event {e.event_id} has no stratum")

@@ -271,6 +271,55 @@ def test_test_strata_are_never_pooled():
     assert pooled["fp"] == 1 and pooled["operating_hours"] == pytest.approx(2 * HOURS)
 
 
+# ------------------------- input validation (Astra MUST-FIX 2) ------------
+# Wired in from vault:40-sessions/2026-09-28-astra-twin-lock-probes.py: a
+# declared grid with missing, duplicate or empty windows must be refused,
+# never scored with a false coverage=1.0.
+@pytest.mark.parametrize("name,ws", [
+    ("missing", np.array([0, 3590])),
+    ("duplicate", np.array([0, 0, 3590])),
+    ("empty", np.array([], dtype=int)),
+])
+def test_score_all_refuses_broken_declared_grid(name, ws):
+    s = E.StratumInput("dev", "FILLER", ws, np.ones(len(ws), bool), np.zeros(len(ws), bool))
+    with pytest.raises(E.InputError):
+        E.score_all([s], [], {"dev": (0, 3600)})
+
+
+def test_score_stratum_refuses_broken_grid_directly():
+    with pytest.raises(E.InputError):
+        E.score_stratum(E.StratumInput("dev", "FILLER", np.array([0, 3590]),
+                                       np.ones(2, bool), np.zeros(2, bool)), [])
+    with pytest.raises(E.InputError):
+        E.score_stratum(E.StratumInput("dev", "FILLER", np.array([], dtype=int),
+                                       np.zeros(0, bool), np.zeros(0, bool)), [])
+
+
+def test_score_stratum_refuses_non_bool_eligible_or_alert():
+    ws = S + 10 * np.arange(N, dtype=np.int64)
+    with pytest.raises(E.InputError):
+        E.score_stratum(E.StratumInput("validation", "FILLER", ws,
+                                       np.ones(N), np.zeros(N, dtype=bool)), [])
+    with pytest.raises(E.InputError):
+        E.score_stratum(E.StratumInput("validation", "FILLER", ws,
+                                       np.ones(N, dtype=bool), np.zeros(N)), [])
+
+
+def test_score_stratum_refuses_dq_reason_length_mismatch():
+    ws = S + 10 * np.arange(N, dtype=np.int64)
+    inp = E.StratumInput("validation", "FILLER", ws, np.ones(N, dtype=bool),
+                         np.zeros(N, dtype=bool), dq_reason=np.full(N - 1, "", dtype=object))
+    with pytest.raises(E.InputError):
+        E.score_stratum(inp, [])
+
+
+def test_score_all_refuses_grid_not_exactly_spanning_split_bounds():
+    ws = S + 10 * np.arange(N, dtype=np.int64)          # valid grid, but split declares more
+    s = E.StratumInput("validation", "FILLER", ws, np.ones(N, bool), np.zeros(N, bool))
+    with pytest.raises(E.InputError):
+        E.score_all([s], [], {"validation": (S, S + (N + 1) * 10)})
+
+
 # ------------------------------------------- selection rule (fixture only)
 def test_select_candidate_rule_on_hand_built_counts():
     cands = [
