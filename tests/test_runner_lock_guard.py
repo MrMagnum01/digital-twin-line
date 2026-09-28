@@ -269,12 +269,48 @@ def test_require_dependency_integrity_rejects_a_missing_package():
 def test_persist_selection_durably_then_require_persisted_selection(tmp_path):
     marker = lock_guard.persist_selection_durably(tmp_path, "abc123", {"table": "locked"})
     assert marker.is_file()
-    lock_guard.require_persisted_selection(tmp_path, "abc123")  # no raise
+    lock_guard.require_persisted_selection(tmp_path, "abc123", {"table": "locked"})  # no raise
 
 
 def test_require_persisted_selection_refuses_without_a_prior_persist(tmp_path):
     with pytest.raises(lock_guard.LockVerificationError, match="no durably persisted"):
-        lock_guard.require_persisted_selection(tmp_path, "never-persisted")
+        lock_guard.require_persisted_selection(tmp_path, "never-persisted", {"table": "locked"})
+
+
+# --- Astra freeze-review r4 group 4 (2026-09-28): "the persisted selection
+# is checked only for existence ... never reads the record or verifies its
+# content/hash. After persist_selection_durably, replacing the file with
+# zero bytes still passes require_persisted_selection." Adapted from
+# Astra's probe (hand-built fixture, no locked generation/fit/subprocess). ---
+
+def test_require_persisted_selection_refuses_a_record_truncated_to_zero_bytes(tmp_path):
+    marker = lock_guard.persist_selection_durably(tmp_path, "trunc-1", {"table": "locked"})
+    marker.write_bytes(b"")
+    with pytest.raises(lock_guard.LockVerificationError, match="could not be read as JSON"):
+        lock_guard.require_persisted_selection(tmp_path, "trunc-1", {"table": "locked"})
+
+
+def test_require_persisted_selection_refuses_content_that_disagrees_with_the_caller(tmp_path):
+    lock_guard.persist_selection_durably(tmp_path, "mismatch-1", {"table": "locked", "chosen_k": 1.0})
+    with pytest.raises(lock_guard.LockVerificationError, match="does not match"):
+        lock_guard.require_persisted_selection(tmp_path, "mismatch-1",
+                                                {"table": "locked", "chosen_k": 2.0})
+
+
+def test_require_persisted_selection_refuses_a_record_whose_own_selection_id_disagrees(tmp_path):
+    marker = tmp_path / "runs" / "_selections" / "id-mismatch.json"
+    marker.parent.mkdir(parents=True)
+    marker.write_text(json.dumps({"selection_id": "a-different-id", "selection": {"table": "locked"}}))
+    with pytest.raises(lock_guard.LockVerificationError, match="does not carry the matching"):
+        lock_guard.require_persisted_selection(tmp_path, "id-mismatch", {"table": "locked"})
+
+
+def test_require_persisted_selection_refuses_a_record_missing_the_selection_field(tmp_path):
+    marker = tmp_path / "runs" / "_selections" / "no-selection-field.json"
+    marker.parent.mkdir(parents=True)
+    marker.write_text(json.dumps({"selection_id": "no-selection-field"}))
+    with pytest.raises(lock_guard.LockVerificationError, match="does not match"):
+        lock_guard.require_persisted_selection(tmp_path, "no-selection-field", {"table": "locked"})
 
 
 def test_persist_selection_durably_fsyncs_file_and_directory(tmp_path, monkeypatch):
@@ -292,3 +328,43 @@ def test_reserve_selection_scoring_refuses_a_second_scoring_of_the_same_selectio
         lock_guard.reserve_selection_scoring(tmp_path, "sel-id-1")
     # a different selection identity is unaffected
     lock_guard.reserve_selection_scoring(tmp_path, "sel-id-2")
+
+
+# --- Astra freeze-review r4 group 4 (2026-09-28): "_write_exclusive_durable
+# ... create[s] directory trees but fsync only the immediate containing
+# directory. When runs/_locked_reservations, _selections or
+# _scored_selections is newly created, its entry in the parent is not
+# explicitly made durable." Both runs/ and runs/_selections/ are newly
+# created here (fresh tmp_path), so both must have their new dentry
+# recorded via an fsync of their own parent. ---
+
+def test_persist_selection_durably_fsyncs_every_newly_created_ancestor_directory(tmp_path, monkeypatch):
+    fsynced_dirs = []
+    real_fsync_dir = lock_guard._fsync_dir
+
+    def _tracking_fsync_dir(dir_path):
+        fsynced_dirs.append(Path(dir_path))
+        return real_fsync_dir(dir_path)
+
+    monkeypatch.setattr(lock_guard, "_fsync_dir", _tracking_fsync_dir)
+    assert not (tmp_path / "runs").exists()
+    lock_guard.persist_selection_durably(tmp_path, "anc-1", {"table": "locked"})
+    assert (tmp_path / "runs") in fsynced_dirs
+    assert (tmp_path / "runs" / "_selections") in fsynced_dirs
+
+
+# --- Astra freeze-review r4 group 1 (2026-09-28): "the child interpreter
+# must run in isolated mode (-I or equivalent): no inherited PYTHONPATH or
+# user site". isolated_subprocess_env() is the belt-and-braces env-stripping
+# half of that fix (the -I flag itself is asserted in test_runner_cli.py,
+# against the actual subprocess.run() call). ---
+
+def test_isolated_subprocess_env_strips_every_python_star_variable():
+    base = {"PYTHONPATH": "/tmp/unreviewed-imports", "PYTHONSTARTUP": "/tmp/unreviewed-startup",
+           "PYTHONHOME": "/tmp/other-home", "PATH": "/usr/bin", "HOME": "/home/x"}
+    cleaned = lock_guard.isolated_subprocess_env(base)
+    assert "PYTHONPATH" not in cleaned
+    assert "PYTHONSTARTUP" not in cleaned
+    assert "PYTHONHOME" not in cleaned
+    assert cleaned["PATH"] == "/usr/bin"
+    assert cleaned["HOME"] == "/home/x"

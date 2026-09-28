@@ -2,6 +2,7 @@
 (dev-table happy path itself is already covered end to end by
 test_runner_pipeline.py)."""
 import json
+import os
 import subprocess
 import sys
 
@@ -190,9 +191,59 @@ def test_cli_reexecs_into_a_fresh_subprocess_for_locked_without_running_it(monke
     assert len(spawned) == 1
     cmd, cwd, env = spawned[0]
     assert cmd[0] == sys.executable
-    assert cmd[1:3] == ["-m", "runner.cli"]
+    assert cmd[1] == "-I"
+    assert cmd[2] == "-c"
+    assert "runner.cli" in cmd[3]
     assert "--table" in cmd and "locked" in cmd
     assert env[lock_guard.CLEAN_SUBPROCESS_ENV] == "1"
+
+
+# --- Astra freeze-review r4 group 1 (2026-09-28): "runner/cli.py:107-109
+# copies the caller environment and launches without isolation. The probe
+# confirms arbitrary PYTHONPATH is inherited." The fix must run the child
+# with -I AND strip PYTHON* vars from its env - checked here at the mocked
+# subprocess.run() boundary; test_isolated_mode_actually_ignores_an_
+# injected_pythonpath below verifies -I's effect with a real interpreter. ---
+
+def test_locked_reexec_runs_isolated_and_strips_python_env_vars(monkeypatch):
+    spawned = []
+    real_run = cli.subprocess.run
+
+    def _fake_run(cmd, *args, cwd=None, env=None, **kwargs):
+        if cmd[:1] == [sys.executable]:
+            spawned.append((cmd, cwd, env))
+            return subprocess.CompletedProcess(cmd, 0)
+        return real_run(cmd, *args, cwd=cwd, env=env, **kwargs)
+
+    monkeypatch.setattr(cli.subprocess, "run", _fake_run)
+    monkeypatch.setattr(cli.lock_guard, "require_dependency_integrity", lambda lock: None)
+    monkeypatch.setenv("PYTHONPATH", "/tmp/unreviewed-imports")
+    monkeypatch.setenv("PYTHONSTARTUP", "/tmp/unreviewed-startup")
+
+    cli._reexec_locked_in_fresh_subprocess([])
+
+    assert len(spawned) == 1
+    cmd, cwd, env = spawned[0]
+    assert "-I" in cmd
+    assert "PYTHONPATH" not in env
+    assert "PYTHONSTARTUP" not in env
+
+
+def test_isolated_mode_actually_ignores_an_injected_pythonpath(tmp_path):
+    """Not mocked: a real child interpreter, launched with -I exactly as
+    _reexec_locked_in_fresh_subprocess launches one, must not execute code
+    from an attacker/caller-controlled PYTHONPATH entry (e.g. a
+    sitecustomize.py) - closing the gap the r4 probe demonstrated
+    (env['PYTHONPATH'] reaching the child unchanged) at the interpreter
+    level, not just in the argv/env this process happens to construct."""
+    shadow = tmp_path / "shadow"
+    shadow.mkdir()
+    marker = tmp_path / "sitecustomize_ran"
+    (shadow / "sitecustomize.py").write_text(f"open({str(marker)!r}, 'w').close()\n")
+    env = dict(os.environ)
+    env["PYTHONPATH"] = str(shadow)
+    subprocess.run([sys.executable, "-I", "-c", "pass"], cwd=str(shadow), env=env, check=True)
+    assert not marker.exists()
 
 
 def test_cli_default_run_dir_is_unique_per_invocation():
@@ -213,3 +264,29 @@ def test_cli_default_run_dir_is_unique_per_invocation():
     finally:
         for d in (set(runs_dir.iterdir()) if runs_dir.is_dir() else set()) - before:
             shutil.rmtree(d, ignore_errors=True)
+
+
+# --- Astra freeze-review r4 group 4 (2026-09-28): "The previously required
+# pre-run lock/seeds/runtime binding ... must still be completed ...
+# pre_run remains the earlier short metadata dictionary." ---
+
+def test_pre_run_binds_lock_hash_version_and_seeds(tmp_path):
+    run_dir = tmp_path / "run_prerun"
+    main(["--table", "dev", "--run-dir", str(run_dir)])
+    pre_run = json.loads((run_dir / "pre_run.json").read_text())
+    assert pre_run["lock_version"] == "lock-3"
+    assert pre_run["experiment_lock_sha256"] == lock_guard.APPROVED_LOCK_SHA256
+    assert set(pre_run["seeds"]) == {901, 902, 903, 904, 905, 906}
+
+
+def test_cli_records_a_failure_artifact_when_the_lock_itself_fails_verification(tmp_path, monkeypatch):
+    """Binding the lock hash/version/seeds into pre_run now runs require_lock()
+    before pre_run.json is written; a bad lock must still leave a failure
+    record, never abort with no artifact trace at all."""
+    run_dir = tmp_path / "run_badlock"
+    monkeypatch.setattr(cli.lock_guard, "APPROVED_LOCK_SHA256", "0" * 64)
+    with pytest.raises(lock_guard.LockVerificationError):
+        main(["--table", "dev", "--run-dir", str(run_dir)])
+    failure = json.loads((run_dir / "failure.json").read_text())
+    assert failure["exception_type"] == "LockVerificationError"
+    assert not (run_dir / "pre_run.json").exists()

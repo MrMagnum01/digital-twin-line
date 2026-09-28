@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import pickle
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -83,15 +84,31 @@ class SelectionResult:
     selection_id: str
 
 
+def _fingerprint(obj) -> str:
+    """A sha256 over a pickle of `obj`'s actual retained state - used to
+    bind the real fitted model/scaler/scoring inputs into the selection
+    identity, not just the small scalar fields that describe them. Two
+    fitted models with different internal parameters pickle to different
+    bytes even when nothing about their type or the calling code changed
+    (Astra freeze-review r4 group 4, 2026-09-28: "the selection hash must
+    bind the actual retained fitted model, scaler and scoring inputs, so a
+    replacement model under the original hash is refused")."""
+    return hashlib.sha256(pickle.dumps(obj, protocol=pickle.HIGHEST_PROTOCOL)).hexdigest()
+
+
 def _selection_identity(sel) -> str:
     """A sha256 over exactly the fields that define what score_test() is
-    about to score - table/lock identity, the generated dataset, and the
-    actual chosen thresholds/models (never the bulky intermediate frames or
-    fitted objects) - so a mutated field after select() returned is
-    detected by hash mismatch, and two selections that chose different
-    thresholds never collide on the same identity (Astra freeze-review r3
-    group 4, 2026-09-28: "Bind the persisted selection to the actual
-    thresholds/model used")."""
+    about to score - table/lock identity, the generated dataset, the
+    actual chosen thresholds, AND the actual retained fitted model, scaler
+    and scoring inputs (fingerprinted, not just the small threshold scalars
+    that describe them) - so a mutated field after select() returned is
+    detected by hash mismatch, two selections that chose different
+    thresholds never collide on the same identity, and swapping in a
+    replacement model/scaler/sensor baseline under the same threshold
+    values is also caught (Astra freeze-review r3 group 4 and r4 group 4,
+    2026-09-28: "Bind the persisted selection to the actual
+    thresholds/model used" / "Persist the full selection identity and
+    model binding, not just the small threshold subset")."""
     payload = {
         "table": sel.table,
         "lock_version": sel.lock.get("lock_version"),
@@ -103,8 +120,23 @@ def _selection_identity(sel) -> str:
         "if_selected": sel.if_selected,
         "chosen_if_threshold": sel.chosen_if_threshold,
         "test_assets": sorted(sel.test_assets),
+        "if_model_fingerprint": _fingerprint(sel.if_model),
+        "scaler_fingerprint": _fingerprint(sel.fs),
+        "sensor_mean_std_fingerprint": _fingerprint(sel.sensor_mean_std),
+        "frames_fingerprint": _fingerprint(sel.frames),
     }
     return hashlib.sha256(json.dumps(payload, sort_keys=True, default=str).encode("utf-8")).hexdigest()
+
+
+def _selection_record(sel) -> dict:
+    """The small, JSON-friendly summary of a selection persisted as its
+    durable record's "selection" field - shared by the persist call in
+    select() and the validating require call in score_test() so the two
+    can never independently drift apart (Astra freeze-review r4 group 4,
+    2026-09-28)."""
+    return {"table": sel.table, "dataset_hash": sel.dataset_hash,
+            "static_selected": sel.static_selected, "chosen_k": sel.chosen_k,
+            "if_selected": sel.if_selected, "chosen_if_threshold": sel.chosen_if_threshold}
 
 
 def _cand_summary(pooled: dict) -> dict:
@@ -266,11 +298,7 @@ def select(table_name: str = "dev", *, allow_locked: bool = False, repo_root=Non
         # (cli.py or a direct pipeline.select() call): score_test() below
         # refuses to score a locked selection without a matching record
         # here (r3 group 4).
-        lock_guard.persist_selection_durably(
-            root, sel.selection_id,
-            {"table": sel.table, "dataset_hash": sel.dataset_hash,
-             "static_selected": sel.static_selected, "chosen_k": sel.chosen_k,
-             "if_selected": sel.if_selected, "chosen_if_threshold": sel.chosen_if_threshold})
+        lock_guard.persist_selection_durably(root, sel.selection_id, _selection_record(sel))
     return sel
 
 
@@ -302,7 +330,8 @@ def score_test(sel: SelectionResult) -> dict:
             "SelectionResult has been mutated since select() produced it: refusing to score "
             "test against a selection whose thresholds/model no longer match what was chosen")
     if sel.table == "locked":
-        lock_guard.require_persisted_selection(sel.repo_root, sel.selection_id)
+        lock_guard.require_persisted_selection(sel.repo_root, sel.selection_id,
+                                               _selection_record(sel))
         lock_guard.reserve_selection_scoring(sel.repo_root, sel.selection_id)
     test_results: dict = {}
     for asset in sel.test_assets:

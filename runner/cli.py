@@ -12,9 +12,12 @@ Every invocation writes exclusive (O_EXCL), never-overwritten artifacts
 under --run-dir, so a report can never be silently overwritten, rerun
 under the same identity, or lost between printing to stdout and actually
 landing on disk (Astra freeze-review MUST-FIX 4, 2026-09-28):
-  pre_run.json    - runner-implementation hashes, table/lock identity,
+  pre_run.json    - runner-implementation hashes, experiment-lock sha256/
+                    version, the seed table this run is about to touch,
                     host and dependency versions, written before any dev
-                    or locked generation happens.
+                    or locked generation happens (Astra freeze-review r4
+                    group 4, 2026-09-28: lock/seeds/runtime binding
+                    completed, not left as the earlier short dict).
   selection.json  - the validation-only candidate tables and chosen
                     thresholds/selections for both models, written via
                     pipeline.select() strictly BEFORE pipeline.score_test()
@@ -52,7 +55,7 @@ class ArtifactExistsError(RuntimeError):
 
 
 def _write_exclusive(path: Path, data: dict) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
+    lock_guard._mkdir_durable(path.parent)
     text = json.dumps(data, indent=1, sort_keys=True, default=str)
     try:
         fd = os.open(str(path), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
@@ -89,6 +92,19 @@ def _git_head(repo_root: Path) -> str | None:
     return out.stdout.strip()
 
 
+def _isolated_bootstrap(root: Path) -> str:
+    """A minimal -c bootstrap for the fresh, isolated (-I) child
+    interpreter: explicitly puts only the verified repo root on sys.path
+    before importing runner.cli - never relying on `-m`'s ambient cwd
+    insertion (which -I removes, so plain `-I -m runner.cli` cannot even
+    find the package) or on any inherited PYTHONPATH. This is the "with
+    controlled imports" half of the isolation fix: the child's own sys.path
+    is built by us, from the one root require_lock() just verified, not by
+    ambient interpreter conventions (Astra freeze-review r4 group 1,
+    2026-09-28)."""
+    return f"import sys; sys.path.insert(0, {str(root)!r}); from runner.cli import main; main()"
+
+
 def _reexec_locked_in_fresh_subprocess(argv: list) -> None:
     """A locked evaluation must execute from a freshly started interpreter,
     never inside this (or any other) already-running process whose already-
@@ -98,15 +114,25 @@ def _reexec_locked_in_fresh_subprocess(argv: list) -> None:
     freeze-review r3 group 1, 2026-09-28). Verifies installed dependency
     versions/hashes against experiment-lock.json's dependency_lock BEFORE
     spawning, so a drifted environment is refused without even starting the
-    child, then re-execs `python -m runner.cli` with the same arguments in
-    a fresh interpreter, marked via lock_guard.CLEAN_SUBPROCESS_ENV so
+    child, then re-execs into a fresh interpreter running in isolated mode
+    (-I: ignores PYTHONPATH/PYTHONHOME and user site-packages, and disables
+    sitecustomize/usercustomize processing) with an explicit, controlled
+    sys.path built from the verified root (see _isolated_bootstrap) -
+    closing the gap where `-m runner.cli` alone still silently inherited an
+    arbitrary caller PYTHONPATH able to shadow imports or run arbitrary
+    startup code (Astra freeze-review r4 group 1, 2026-09-28: "the child
+    interpreter must run in isolated mode ... no inherited PYTHONPATH or
+    user site"). The env passed to the child additionally strips every
+    PYTHON* variable as a second, independent layer - belt and braces, not
+    a substitute for -I. Marked via lock_guard.CLEAN_SUBPROCESS_ENV so
     pipeline.select() knows this is that fresh child, not a direct caller."""
     root = lock_guard.REPO_ROOT
     lock = lock_guard.require_lock(root)
     lock_guard.require_dependency_integrity(lock)
-    env = dict(os.environ)
+    env = lock_guard.isolated_subprocess_env(os.environ)
     env[lock_guard.CLEAN_SUBPROCESS_ENV] = "1"
-    result = subprocess.run([sys.executable, "-m", "runner.cli", *argv], cwd=str(root), env=env)
+    cmd = [sys.executable, "-I", "-c", _isolated_bootstrap(root), *argv]
+    result = subprocess.run(cmd, cwd=str(root), env=env)
     if result.returncode != 0:
         raise SystemExit(result.returncode)
 
@@ -142,20 +168,33 @@ def main(argv=None) -> None:
         stamp = started.strftime("%Y%m%dT%H%M%S%fZ")
         run_dir = root / "runs" / f"{args.table}-{stamp}-{os.getpid()}"
 
-    pre_run = {
-        "started_at": started.isoformat(),
-        "table": args.table,
-        "allow_locked": args.allow_locked,
-        "repo_root": str(root),
-        "repo_head": _git_head(root),
-        "runner_implementation_sha256": {
-            rel: lock_guard._sha256_file(root / rel) for rel in _RUNNER_IMPLEMENTATION_FILES
-        },
-        "host": platform.node(),
-        "platform": platform.platform(),
-        "dependency_versions": _dependency_versions(),
-    }
     try:
+        # Lock/seeds/runtime binding is established HERE, before any
+        # generation happens, not left as "pre_run records package versions
+        # rather than enforcing them" (Astra freeze-review r3 group 4). A
+        # bad lock now fails inside this same try/except, so the attempt
+        # still leaves a failure.json record rather than aborting with no
+        # trace at all - re-verified again inside pipeline.select() itself
+        # regardless, per that module's own point-of-use philosophy.
+        lock = lock_guard.require_lock(root)
+        cfg = lock_guard.load_verified_config(root, lock)
+        seeds = sorted({s for sp in cfg[f"split_table_{args.table}"]["splits"] for s in sp["seeds"]})
+        pre_run = {
+            "started_at": started.isoformat(),
+            "table": args.table,
+            "allow_locked": args.allow_locked,
+            "repo_root": str(root),
+            "repo_head": _git_head(root),
+            "experiment_lock_sha256": lock_guard._sha256_file(root / "experiment-lock.json"),
+            "lock_version": lock.get("lock_version"),
+            "seeds": seeds,
+            "runner_implementation_sha256": {
+                rel: lock_guard._sha256_file(root / rel) for rel in _RUNNER_IMPLEMENTATION_FILES
+            },
+            "host": platform.node(),
+            "platform": platform.platform(),
+            "dependency_versions": _dependency_versions(),
+        }
         _write_exclusive(run_dir / "pre_run.json", pre_run)
     except ArtifactExistsError:
         raise

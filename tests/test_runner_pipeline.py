@@ -269,3 +269,56 @@ def test_score_test_refuses_a_mutated_selection_result():
     sel.chosen_k = (sel.chosen_k or 0) + 1.0  # mutate a field score_test() actually uses
     with pytest.raises(pipeline.SelectionIntegrityError):
         pipeline.score_test(sel)
+
+
+# --- Astra freeze-review r4 group 4 (2026-09-28): "the fitted model and
+# scoring state are outside the selection hash ... Replacing sel.if_model
+# leaves selection_id unchanged; the replacement model reaches
+# isolation_forest_alert under the original identity. sensor_mean_std,
+# scaler and frames likewise are outside that identity." Adapted from
+# Astra's probe (hand-built fixture / mocked scoring, no locked generation
+# or subprocess): here exercised against a real select() selection so the
+# fitted model/scaler genuinely differ, not two identically-empty stand-ins. ---
+
+def test_selection_identity_changes_when_the_fitted_model_is_replaced():
+    from sklearn.ensemble import IsolationForest
+
+    sel = pipeline.select("dev")
+    original_id = sel.selection_id
+    sel.if_model = IsolationForest(n_estimators=3, random_state=0).fit(np.zeros((5, 1)))
+    assert pipeline._selection_identity(sel) != original_id
+    with pytest.raises(pipeline.SelectionIntegrityError):
+        pipeline.score_test(sel)
+
+
+def test_selection_identity_changes_when_the_scaler_is_replaced():
+    import features as feat
+
+    sel = pipeline.select("dev")
+    original_id = sel.selection_id
+    sel.fs = feat.FittedScaler(scaler=object(), columns=sel.fs.columns,
+                               dropped=sel.fs.dropped, n_fit_rows=sel.fs.n_fit_rows)
+    assert pipeline._selection_identity(sel) != original_id
+    with pytest.raises(pipeline.SelectionIntegrityError):
+        pipeline.score_test(sel)
+
+
+def test_selection_identity_changes_when_sensor_mean_std_is_replaced():
+    sel = pipeline.select("dev")
+    original_id = sel.selection_id
+    sel.sensor_mean_std = {"replaced": (0.0, 1.0)}
+    assert pipeline._selection_identity(sel) != original_id
+    with pytest.raises(pipeline.SelectionIntegrityError):
+        pipeline.score_test(sel)
+
+
+def test_selection_identity_changes_when_a_frame_is_replaced():
+    from types import SimpleNamespace
+
+    sel = pipeline.select("dev")
+    original_id = sel.selection_id
+    key = next(iter(sel.frames))
+    sel.frames[key] = SimpleNamespace(eligible=np.array([True]))
+    assert pipeline._selection_identity(sel) != original_id
+    with pytest.raises(pipeline.SelectionIntegrityError):
+        pipeline.score_test(sel)

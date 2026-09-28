@@ -58,6 +58,18 @@ PINNED_SUBMODULE_COMMIT = "7e378facb410b529d8e2d72d329daf2eee515161"
 CLEAN_SUBPROCESS_ENV = "TWIN_RUNNER_LOCKED_CLEAN_SUBPROCESS"
 
 
+def isolated_subprocess_env(base_env: dict) -> dict:
+    """A copy of `base_env` with every PYTHON*-prefixed variable removed -
+    belt-and-braces alongside the child's own -I flag, which already
+    ignores PYTHONPATH/PYTHONHOME and user site-packages independently of
+    what is in `env`. Neither mechanism alone should be the only thing
+    standing between an inherited PYTHONPATH/PYTHONSTARTUP and the locked
+    child's imports (Astra freeze-review r4 group 1, 2026-09-28: "the child
+    interpreter must run in isolated mode (-I or equivalent): no inherited
+    PYTHONPATH or user site")."""
+    return {k: v for k, v in base_env.items() if not k.startswith("PYTHON")}
+
+
 class LockVerificationError(RuntimeError):
     """Raised whenever the runner must refuse to proceed: unapproved or
     tampered lock, a locked file that no longer matches its recorded hash,
@@ -85,11 +97,35 @@ def _fsync_dir(dir_path: Path) -> None:
         os.close(fd)
 
 
+def _mkdir_durable(path: Path) -> None:
+    """mkdir -p `path`, fsync-ing every directory newly created along the
+    way: both the new directory's own inode and its containing parent (to
+    durably record the new dentry), one level at a time from the first
+    missing ancestor down to `path` - not just `path` itself. Fixing only
+    the leaf directory's fsync (the previous behaviour) left an entry like
+    runs/_locked_reservations, runs/_selections or runs/_scored_selections
+    unrecorded in ITS parent when `runs/` itself was also newly created by
+    the same mkdir(parents=True) call (Astra freeze-review r4 group 4,
+    2026-09-28: "its entry in the parent is not explicitly made
+    durable")."""
+    path = Path(path)
+    missing = []
+    d = path
+    while not d.exists():
+        missing.append(d)
+        d = d.parent
+    for d in reversed(missing):
+        d.mkdir(exist_ok=True)
+        _fsync_dir(d)
+        _fsync_dir(d.parent)
+
+
 def _write_exclusive_durable(path: Path, payload: bytes) -> None:
     """O_EXCL create-and-write `payload` at `path`, fsync the file, then
-    fsync its containing directory. Shared by every durable reservation/
-    artifact marker below."""
-    path.parent.mkdir(parents=True, exist_ok=True)
+    fsync its containing directory - and, via _mkdir_durable, every newly
+    created ancestor directory's own new dentry too. Shared by every
+    durable reservation/artifact marker below."""
+    _mkdir_durable(path.parent)
     fd = os.open(str(path), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
     with os.fdopen(fd, "wb") as fh:
         fh.write(payload)
@@ -345,10 +381,20 @@ def persist_selection_durably(root: Path | str, selection_id: str, selection: di
     return marker
 
 
-def require_persisted_selection(root: Path | str, selection_id: str) -> None:
+def require_persisted_selection(root: Path | str, selection_id: str,
+                                expected_selection: dict) -> None:
     """Refuse unless persist_selection_durably() already wrote a durable
-    record for exactly this selection_id - the immutable, content-hashed
-    identity of the selection score_test() is about to score."""
+    record for exactly this selection_id, AND that record's actual content
+    parses and matches `expected_selection` - the caller's current
+    selection content, not merely a same-named file that happens to exist.
+    A missing file, an unreadable/non-JSON file (e.g. truncated to zero
+    bytes), a record whose own `selection_id` field disagrees, or a record
+    whose `selection` content differs from what is about to be scored, are
+    all refused identically to a missing record (Astra freeze-review r4
+    group 4, 2026-09-28: "Parse and validate the actual retained record,
+    lock/reservation identity and selection content before scoring;
+    missing, partial, conflicting or mismatched records must refuse. A
+    filename and is_file are not content verification.")."""
     root = Path(root).resolve()
     marker = root / "runs" / "_selections" / f"{selection_id}.json"
     if not marker.is_file():
@@ -356,6 +402,21 @@ def require_persisted_selection(root: Path | str, selection_id: str) -> None:
             f"no durably persisted selection record found for identity {selection_id} at "
             f"{marker}: refusing to score test before the validation-only selection is on "
             "durable storage")
+    try:
+        record = json.loads(marker.read_bytes())
+    except (OSError, ValueError) as exc:
+        raise LockVerificationError(
+            f"persisted selection record at {marker} could not be read as JSON: refusing to "
+            f"score test against a missing, empty or corrupted durable record ({exc})") from exc
+    if not isinstance(record, dict) or record.get("selection_id") != selection_id:
+        raise LockVerificationError(
+            f"persisted selection record at {marker} does not carry the matching selection_id "
+            f"{selection_id!r} (got {record.get('selection_id') if isinstance(record, dict) else record!r}): "
+            "refusing to score test against a partial or conflicting durable record")
+    if record.get("selection") != expected_selection:
+        raise LockVerificationError(
+            f"persisted selection record at {marker} content does not match the selection "
+            "being scored: refusing to score test against a mismatched or tampered durable record")
 
 
 def reserve_selection_scoring(root: Path | str, selection_id: str) -> Path:
