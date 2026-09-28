@@ -12,3 +12,4 @@ out/
 *.parquet
 # schema is source, not data (overrides any broader *.sql ignore)
 !src/schema.sql
+!monitoring/schema.sql

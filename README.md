@@ -34,6 +34,110 @@ Any measured number that comes out of this machinery later will hold **on this s
 | `scripts/make_lock.py` | Writes `experiment-lock.json` from the committed bytes. It reads files only. |
 | `vendor/plant-shift-oee-report` | Git **submodule**, pinned at `7e378facb410b529d8e2d72d329daf2eee515161`. Read-only. |
 | `requirements.txt` / `requirements.lock` | Direct pins, and the complete transitive lock with sha256 hashes. |
+| `runner/` | The model-fit + threshold-selection runner (this milestone). Refuses to run at all unless the approved `experiment-lock.json` and every file it hashes still verify. See "Model runner" below. |
+| `dashboard/` | A Streamlit live view, reading only from a DuckDB file. See "Dashboard" below. |
+| `monitoring/` | An operational rule + model alert log, separate from the frozen protocol's evaluation. See "Monitoring" below. |
+
+## Model runner, dashboard and monitoring (this milestone)
+
+> **Still a lock-only milestone for locked-seed purposes.** `runner/` is built
+> and tested (development seeds and hand-built fixtures only) for Astra's
+> runner review. **No locked-seed evaluation has been run.** `generator.generate("locked", ...)`
+> still refuses unless a caller explicitly passes `allow_locked=True`, and
+> nothing in `runner/`, `dashboard/` or `monitoring/` does. `dashboard/` and
+> `monitoring/` are demo/operational code, not the frozen evaluation, and
+> make no locked-evaluation or performance claim anywhere (see "What this
+> demo does not claim").
+
+### `runner/` - model-fit + threshold-selection
+
+- `runner/lock_guard.py` - the refusal gate. `require_lock()` checks that
+  `experiment-lock.json`'s own sha256 equals the sha Astra signed off for
+  lock-3 (`vault:10-projects/freelance/launch/twin/astra-lock-3-signoff.md`),
+  that every file hash it records (`src/generator.py`, `src/ingest.py`,
+  `src/features.py`, `src/evaluator.py`, `config.yaml`, plus
+  `src/twin_config.py`, `src/schema.sql`, `requirements.txt`,
+  `requirements.lock`, `pytest.ini`) still matches the bytes on disk, and
+  that the pinned plant-ingest submodule's actual git HEAD agrees. Any
+  mismatch is a hard refusal, not a warning.
+- `runner/models.py` - candidate builders only (fits nothing on validation
+  or test, chooses no threshold): the static per-sensor threshold (train
+  mean/std, k grid) and IsolationForest (config params taken as-is,
+  contamination never tuned; train-score quantile candidate thresholds).
+- `runner/pipeline.py` - `run(table_name="dev", allow_locked=False, ...)`
+  orchestrates the frozen procedure once: `lock_guard.require_lock()` ->
+  generate -> features -> `fit_scaler` on TRAIN only -> build+score both
+  models' candidates on VALIDATION only, pooled, and select a threshold per
+  model with `evaluator.select_candidate` (max event F1 within the
+  false-alert cap; ties broken as frozen) -> score TEST exactly once per
+  stratum (FILLER seen-asset, LABELLER unseen-asset - never pooled,
+  matching `evaluator.pool_counts`'s refusal to pool any test stratum).
+- `runner/cli.py` - `python3 -m runner.cli --table dev` (default; writes a
+  JSON report). `--table locked` additionally requires
+  `--i-have-clearance-to-run-locked-seeds`, and even then `lock_guard` and
+  `generator`'s own refusal still apply underneath - nothing in this
+  repo's tests, dashboard or monitoring code ever passes that flag.
+- Tests (`tests/test_runner_*.py`) exercise `lock_guard` against the real
+  repo plus hand-tampered `tmp_path` copies, `models.py` against hand-built
+  fixtures and tiny synthetic matrices, and `pipeline.py`/`cli.py` against
+  the DEVELOPMENT table only - asserting the refusal gates fire before
+  anything is generated, that test strata are scored exactly once each and
+  never pooled, and that the reported dataset hash matches an independent
+  `generator.generate("dev")` call.
+
+### `dashboard/` - Streamlit live view
+
+`dashboard/seed_demo_db.py` is the only thing that writes to the demo
+DuckDB file: it generates the DEVELOPMENT seed table (901-906, never
+locked), ingests a bounded recent window (default 3h) per machine through
+this repo's own `src/ingest.py` unmodified, ingests the **cleared plant
+demo's own** deterministic synthetic day through *its own*
+`ingester.Ingester` (vendor/plant-shift-oee-report, unmodified - called
+directly with each event's JSON payload, no MQTT broker needed for a
+one-shot seed), and runs one pass of `monitoring`'s rule + model alert log
+over the freshly ingested sensor history. `dashboard/app.py`
+(`streamlit run dashboard/app.py`, or set `TWIN_DB_PATH`) only ever
+**reads** that file: per-machine sensor values and an ingest reconciliation
+summary, the alert log, OEE computed by the plant demo's own unmodified
+`report.build_report_data()` against its own STATE/COUNT/ALARM tables (not
+the twin's sensor data - see its own `OEE_METHOD_NOTE`), and an inline SVG
+line schematic (FILLER -> CAPPER -> LABELLER) coloured by each machine's
+latest plant-demo STATE, with the state name always rendered as text (never
+colour alone). Colours follow the project's validated categorical/status
+palette (`dashboard/palette.py`); all interpolated strings in the SVG are
+HTML-escaped.
+
+```bash
+python3 dashboard/seed_demo_db.py --db out/twin_demo.duckdb --force
+streamlit run dashboard/app.py   # TWIN_DB_PATH=out/twin_demo.duckdb by default
+```
+
+Additional dependencies (`streamlit`, `altair`, `pandas`, and their
+transitive packages - all OSI-licensed, see `LICENSES.md` "Dashboard
+dependencies") live in `dashboard/requirements.txt`, separate from the
+locked `requirements.lock`: `pip install -r dashboard/requirements.txt`.
+
+Tested with `streamlit.testing.v1.AppTest` (`tests/test_dashboard_app.py`),
+which actually executes `app.py`'s script and widget tree headlessly - no
+browser is available in this build environment. A manual `streamlit run` +
+HTTP smoke check (200 OK) was also run once by hand; it is not part of the
+automated suite.
+
+### `monitoring/` - rule + model alert log
+
+Deliberately **not** the frozen protocol: `monitoring/rules.py` is a causal
+expanding per-sensor z-score computed from a machine's own strictly-prior
+history (never a future sample; a future-perturbation test covers this, the
+same pattern `tests/test_features.py` already uses for the locked feature
+pipeline). `monitoring/model_monitor.py` fits an IsolationForest once on a
+fixed causal warm-up slice of a machine's own history (config's frozen
+params, contamination never tuned), then scores forward against that fixed
+baseline. `monitoring/alert_log.py` writes both streams to
+`monitoring_alert_log` (`monitoring/schema.sql`, a new table - `src/schema.sql`
+itself is never touched) in the same DuckDB file, idempotently (a
+`UNIQUE` constraint plus `ON CONFLICT DO NOTHING`; note `sensor` is
+`NOT NULL` - a `NULL` in a `UNIQUE` column is never equal to another `NULL`,
+which would otherwise silently defeat the constraint on every rerun).
 
 ## Reuse of the cleared plant ingest (pinned reference, not a fork)
 
@@ -289,6 +393,13 @@ replacement from a split-level seed:
   - write-failure rollback, restart replay, and a crash in the middle of a batch;
   - a dev-seed round trip from the generator through ingest back to the declared grid.
 - `tests/test_lock.py` checks the submodule pin and that `experiment-lock.json` matches the files.
+- `tests/test_runner_lock_guard.py` checks the refusal gate against the real repo and hand-tampered `tmp_path` copies (missing lock, disagreeing approved sha, a tampered or missing hashed file, submodule drift, and that every problem is collected, not just the first).
+- `tests/test_runner_models.py` checks the static-threshold and IsolationForest candidate builders on hand-built fixtures and tiny synthetic matrices (config params taken as-is; never alerting on an ineligible or non-finite window).
+- `tests/test_runner_pipeline.py` and `tests/test_runner_cli.py` check the full run on the DEVELOPMENT table only: the lock is verified before anything is generated, the locked table is refused without `allow_locked=True`, every validation candidate is retained, test is scored exactly once per stratum and never pooled, and the reported dataset hash matches an independent `generator.generate("dev")` call.
+- `tests/test_monitoring_rules.py` checks the causal expanding z-score rule: no alert before `min_history`, a clear spike alerts, quiet baseline noise does not, ineligible windows never alert, and - the same pattern `test_features.py` uses for the locked pipeline - a later perturbation never changes an earlier decision.
+- `tests/test_monitoring_model_monitor.py` and `tests/test_monitoring_alert_log.py` check the operational IsolationForest baseline (insufficient-baseline refusal, determinism, never alerting on an ineligible window, a gross outlier scoring above baseline noise) and the alert log (writes both streams, idempotent rerun, filters by machine).
+- `tests/test_dashboard_data.py` checks every pure query/SVG function on a hand-built in-memory DuckDB (including that untrusted strings are HTML-escaped in the schematic).
+- `tests/test_dashboard_seed.py` and `tests/test_dashboard_app.py` run the real seed pipeline on a short DEVELOPMENT-table window (never locked) and drive `dashboard/app.py` headlessly with `streamlit.testing.v1.AppTest`, asserting no exception and that the role-line/claim text renders.
 
 ## Open items and deviations (flagged, not decided here)
 
@@ -296,15 +407,20 @@ replacement from a split-level seed:
 - **Always-alert scope.** The baseline covers every eligible window, including planned stops. It does not cover "operating time" only, because a constant detector has no schedule input. Its planned-stop alarms are reported separately.
 - **Selection objective.** Event F1 is computed over all planted events, equipment and data together, with the two validation assets pooled. The protocol does not say whether data faults count toward selection, so this choice is frozen here and open to review.
 - **Dependency lock scope.** The lock is platform-specific: CPython 3.13 on manylinux x86_64.
+- **Runner pending review.** `runner/` is built and self-tested (development seeds and hand-built fixtures only) but has not yet had Astra's runner review; no locked-seed evaluation may be run before that review, per the lock-3 sign-off's own "Next step".
+- **Monitoring is not the frozen evaluation.** `monitoring/`'s rule and model baselines use a live per-machine operational fit (an expanding history / a fixed causal warm-up slice), not the protocol's train/validation/test split, and are not validation-selected. No number from `monitoring/` or `dashboard/` is a locked-evaluation result.
 
 ## What this demo does not claim
 
 - It makes no result claim of any kind, because no results exist yet.
 - Any later score measures only this declared synthetic generator. Its windows are correlated, and there is no calibrated industrial confidence and no industrial reliability claim.
 - It represents no real plant, employer schema or process. The line, tags and faults are invented.
+- `dashboard/`'s OEE panel is the cleared plant demo's own numbers on its own deterministic day (see `report.OEE_METHOD_NOTE`) - it is not a measurement of the twin's synthetic line, and is not combined with it into one number.
+- `monitoring/`'s rule and model alerts are an operational demo over whatever history is in the database (development seeds in this milestone); they are not the frozen protocol's selected model or threshold, and carry no detection-rate claim.
 
 ## Self-check before delivery
 
 - Tested from a clean clone into a fresh venv, installing with `--require-hashes` from `requirements.lock`, then running the full suite and this Quickstart verbatim.
 - Grepped for owner, host and employer strings. None are present.
 - `git -C vendor/plant-shift-oee-report status` is clean, at the pinned SHA.
+- This milestone (`runner/`, `dashboard/`, `monitoring/`): full suite (`python3 -m pytest -v`, 186 tests) run in the same venv plus `dashboard/requirements.txt`; `gitleaks detect` run over the working tree and history; confirmed no test generates or reads the locked seed table (101-110 / 201-204 / 301-306) - every test asserts development-seed-only (`{901..906}`) or uses hand-built fixtures, and `runner.lock_guard.verify_lock()` passes against the unmodified repo.

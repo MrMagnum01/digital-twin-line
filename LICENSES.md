@@ -31,6 +31,52 @@ OSI-approved.
 | packaging | 26.3 | transitive (pytest) | Apache-2.0 OR BSD-2-Clause | yes |
 | Pygments | 2.21.0 | transitive (pytest) | BSD-2-Clause | yes |
 
+## Dashboard dependencies (`dashboard/requirements.txt`, direct and transitive)
+
+Additional to the table above; only used by `dashboard/` and `monitoring/`,
+never by the frozen `src/` modules or `runner/`. Taken from installed
+distribution metadata in the same venv. Every package's own licence is
+OSI-approved; none is paid or closed-source.
+
+| Package | Version | Direct? | Licence (installed metadata) | OSI-approved |
+|---|---|---|---|---|
+| streamlit | 1.64.0 | direct | Apache-2.0 | yes |
+| altair | 6.3.0 | direct | BSD License (classifier) | yes |
+| pandas | 3.0.6 | direct | BSD License (classifier) | yes |
+| MarkupSafe | 3.0.3 | transitive (jinja2) | BSD-3-Clause | yes |
+| anyio | 4.15.1 | transitive (starlette) | MIT | yes |
+| attrs | 26.1.0 | transitive (jsonschema) | MIT | yes |
+| certifi | 2026.7.22 | transitive (requests) | Mozilla Public License 2.0 (MPL 2.0) | yes |
+| charset-normalizer | 3.5.1 | transitive (requests) | MIT | yes |
+| click | 8.5.0 | transitive (streamlit) | BSD-3-Clause | yes |
+| h11 | 0.16.0 | transitive (uvicorn) | MIT | yes |
+| httptools | 0.8.0 | transitive (uvicorn) | MIT | yes |
+| idna | 3.20 | transitive (requests) | BSD-3-Clause | yes |
+| itsdangerous | 2.2.0 | transitive (streamlit) | BSD License (classifier) | yes |
+| jinja2 | 3.1.6 | transitive (streamlit) | BSD License (classifier) | yes |
+| jsonschema | 4.26.0 | transitive (altair) | MIT | yes |
+| jsonschema-specifications | 2025.9.1 | transitive (jsonschema) | MIT | yes |
+| pillow | 12.3.0 | transitive (streamlit) | MIT-CMU (HPND family) | yes |
+| protobuf | 7.36.2 | transitive (streamlit) | 3-Clause BSD | yes |
+| pyarrow | 25.0.1 | transitive (streamlit) | Apache-2.0 | yes |
+| pydeck | 0.9.3 | transitive (streamlit) | Apache License 2.0 | yes |
+| python-dateutil | 2.9.0.post0 | transitive (pandas) | BSD License / Apache Software License (dual) | yes |
+| python-multipart | 0.0.32 | transitive (streamlit) | Apache Software License | yes |
+| referencing | 0.37.0 | transitive (jsonschema) | MIT | yes |
+| requests | 2.34.2 | transitive (streamlit) | Apache Software License | yes |
+| rpds-py | 2026.6.3 | transitive (jsonschema) | MIT | yes |
+| six | 1.17.0 | transitive (python-dateutil) | MIT | yes |
+| starlette | 1.7.0 | transitive (streamlit) | BSD-3-Clause | yes |
+| toml | 0.10.2 | transitive (streamlit) | MIT | yes |
+| typing-extensions | 4.16.0 | transitive (streamlit) | PSF-2.0 | yes |
+| urllib3 | 2.8.0 | transitive (requests) | MIT | yes |
+| uvicorn | 0.54.0 | transitive (streamlit) | BSD-3-Clause | yes |
+| watchdog | 6.0.0 | transitive (streamlit) | Apache Software License | yes |
+| websockets | 16.1.1 | transitive (streamlit) | BSD-3-Clause | yes |
+
+Not hash-locked like `requirements.lock` (see `dashboard/requirements.txt`'s
+own header for why); version-pinned only.
+
 ## Bundled components inside binary wheels (flagged, decision pending)
 
 The numpy, scipy and scikit-learn **wheels** vendor third-party code whose
