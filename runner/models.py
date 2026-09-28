@@ -57,9 +57,18 @@ def static_threshold_alert(frame, sensor_mean_std: dict, k: float, sensors: list
     n = len(frame.eligible)
     eligible = np.asarray(frame.eligible, dtype=bool)
     out_of_band = np.zeros(n, dtype=bool)
+    if not np.isfinite(k):
+        raise NonFiniteEligibleInputError(
+            f"static-threshold k={k!r} is non-finite: refusing to compare eligible windows "
+            "against an undefined band rather than silently returning no-alert")
     for s in sensors:
         mean, std = sensor_mean_std[s]
         lo, hi = mean - k * std, mean + k * std
+        if not (np.isfinite(lo) and np.isfinite(hi)):
+            raise NonFiniteEligibleInputError(
+                f"{s} static-threshold band is non-finite (lo={lo}, hi={hi}): refusing to "
+                "compare eligible windows against it - a NaN/inf bound must never silently "
+                "compare False on both sides")
         col = np.asarray(frame.columns[f"{s}__mean_5m"], dtype=np.float64)
         bad = eligible & ~np.isfinite(col)
         if bad.any():
@@ -107,6 +116,11 @@ def isolation_forest_alert(frame, fitted_scaler, model, threshold: float) -> np.
     than silently scoring as no-alert/healthy."""
     from features import transform
 
+    if not np.isfinite(threshold):
+        raise NonFiniteEligibleInputError(
+            f"isolation-forest threshold={threshold!r} is non-finite: refusing to compare "
+            "eligible scores against an undefined threshold rather than silently returning "
+            "no-alert")
     n = len(frame.eligible)
     eligible = np.asarray(frame.eligible, dtype=bool)
     scores = np.full(n, np.nan)

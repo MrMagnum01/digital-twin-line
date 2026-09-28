@@ -16,11 +16,15 @@ landing on disk (Astra freeze-review MUST-FIX 4, 2026-09-28):
                     host and dependency versions, written before any dev
                     or locked generation happens.
   selection.json  - the validation-only candidate tables and chosen
-                    thresholds/selections for both models.
-  evaluation.json - the full pipeline.run() report.
-  failure.json    - written instead of evaluation.json if the run raises,
-                    recording the exception so a failed run is never just
-                    silently absent.
+                    thresholds/selections for both models, written via
+                    pipeline.select() strictly BEFORE pipeline.score_test()
+                    makes any test-split score_stratum call (Astra freeze-
+                    review r2 group 4, 2026-09-28 - selection.json used to
+                    be written only after test was already scored).
+  evaluation.json - the full report (pipeline.select() + score_test()).
+  failure.json    - written instead of evaluation.json if either phase
+                    raises, recording the exception so a failed run is
+                    never just silently absent.
 Re-running against the same --run-dir refuses at the first artifact write
 (pre_run.json) rather than overwriting or silently reusing that identity.
 """
@@ -35,8 +39,7 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
-from runner import lock_guard
-from runner.pipeline import run
+from runner import lock_guard, pipeline
 
 _RUNNER_IMPLEMENTATION_FILES = (
     "runner/pipeline.py", "runner/lock_guard.py", "runner/models.py", "runner/cli.py",
@@ -119,7 +122,7 @@ def main(argv=None) -> None:
     _write_exclusive(run_dir / "pre_run.json", pre_run)
 
     try:
-        report = run(args.table, allow_locked=args.allow_locked)
+        sel = pipeline.select(args.table, allow_locked=args.allow_locked)
     except BaseException as exc:
         failure = {"failed_at": datetime.now(timezone.utc).isoformat(),
                   "exception_type": type(exc).__name__, "exception_message": str(exc)}
@@ -127,15 +130,26 @@ def main(argv=None) -> None:
         raise
 
     selection = {
-        "table": report["table"],
-        "lock_version": report["lock_version"],
-        "dataset_hash": report["dataset_hash"],
-        "static_threshold_selection": report["static_threshold"]["selection"],
-        "static_threshold_chosen_k": report["static_threshold"]["chosen_k"],
-        "isolation_forest_selection": report["isolation_forest"]["selection"],
-        "isolation_forest_chosen_threshold": report["isolation_forest"]["chosen_threshold"],
+        "table": sel.table,
+        "lock_version": sel.lock.get("lock_version"),
+        "dataset_hash": sel.dataset_hash,
+        "static_threshold_selection": sel.static_threshold_report["selection"],
+        "static_threshold_chosen_k": sel.static_threshold_report["chosen_k"],
+        "isolation_forest_selection": sel.isolation_forest_report["selection"],
+        "isolation_forest_chosen_threshold": sel.isolation_forest_report["chosen_threshold"],
     }
+    # Written before score_test() below makes any test-split score_stratum
+    # call: the validation-only selection is on durable storage first.
     _write_exclusive(run_dir / "selection.json", selection)
+
+    try:
+        report = pipeline.score_test(sel)
+    except BaseException as exc:
+        failure = {"failed_at": datetime.now(timezone.utc).isoformat(),
+                  "exception_type": type(exc).__name__, "exception_message": str(exc)}
+        _write_exclusive(run_dir / "failure.json", failure)
+        raise
+
     _write_exclusive(run_dir / "evaluation.json", report)
     print(json.dumps(report, indent=1, sort_keys=True, default=str))
 

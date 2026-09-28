@@ -149,3 +149,63 @@ def test_require_import_paths_rejects_a_repo_root_the_real_module_is_not_under(t
 def test_require_import_paths_passes_for_the_real_repo():
     import generator
     lock_guard.require_import_paths(lock_guard.REPO_ROOT, {"src/generator.py": generator})
+
+
+# --- Astra freeze-review r2 group 1 (2026-09-28): the guard must bind the
+# config value actually USED, not merely what was hashed on disk earlier -
+# no cached or mutated config object may pass through after the guard. ---
+
+def test_load_verified_config_returns_a_deep_frozen_structure(tmp_path):
+    _copy_repo_subset(tmp_path)
+    lock = lock_guard.verify_lock(repo_root=tmp_path)
+    cfg = lock_guard.load_verified_config(tmp_path, lock)
+    assert cfg["models"]["isolation_forest"]["params"]["contamination"] == 0.01
+    with pytest.raises(TypeError):
+        cfg["models"]["isolation_forest"]["params"]["contamination"] = 0.4
+    assert isinstance(cfg["models"]["static_threshold"]["k_grid"], tuple)
+    with pytest.raises(AttributeError):
+        cfg["models"]["static_threshold"]["k_grid"].append(99)  # tuple: no .append
+
+
+def test_load_verified_config_refuses_when_lock_disagrees_with_config_bytes_at_use(tmp_path):
+    _copy_repo_subset(tmp_path)
+    lock = json.loads((tmp_path / "experiment-lock.json").read_bytes())
+    lock["sha256"]["config.yaml"] = "0" * 64
+    with pytest.raises(lock_guard.LockVerificationError, match="config.yaml sha256"):
+        lock_guard.load_verified_config(tmp_path, lock)
+
+
+def test_load_verified_config_is_unaffected_by_a_mutated_twin_config_cache():
+    """The literal r2 probe: twin_config.load_config() returns the SAME
+    mutable dict on every call in this process. Mutating that cached
+    object's contamination to 0.4 must never reach a value load_verified_
+    config() hands to a real run."""
+    import twin_config
+
+    cached = twin_config.load_config()
+    original = cached["models"]["isolation_forest"]["params"]["contamination"]
+    cached["models"]["isolation_forest"]["params"]["contamination"] = 0.4
+    try:
+        lock = lock_guard.require_lock()
+        cfg = lock_guard.load_verified_config(lock_guard.REPO_ROOT, lock)
+        assert cfg["models"]["isolation_forest"]["params"]["contamination"] == original
+    finally:
+        cached["models"]["isolation_forest"]["params"]["contamination"] = original
+
+
+# --- Astra freeze-review r2 group 4 (2026-09-28): a durable, experiment-
+# wide reservation must refuse a second locked evaluation regardless of
+# --run-dir or caller. Tests the guard directly; never passes allow_locked
+# through pipeline/generator and never touches locked seeds. ---
+
+def test_reserve_locked_evaluation_refuses_a_second_reservation_for_the_same_lock(tmp_path):
+    _copy_repo_subset(tmp_path)
+    marker = lock_guard.reserve_locked_evaluation(tmp_path)
+    assert marker.is_file()
+    with pytest.raises(lock_guard.LockVerificationError, match="already been reserved"):
+        lock_guard.reserve_locked_evaluation(tmp_path)
+    # Not scoped to any particular --run-dir: the marker lives outside one,
+    # so a caller pointed at a different --run-dir (irrelevant to this
+    # call at all) still hits the same, already-claimed reservation.
+    with pytest.raises(lock_guard.LockVerificationError, match="already been reserved"):
+        lock_guard.reserve_locked_evaluation(tmp_path)

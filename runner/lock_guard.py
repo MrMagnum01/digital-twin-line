@@ -36,7 +36,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import subprocess
+import types
+from datetime import datetime, timezone
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -131,6 +134,82 @@ def require_import_paths(root: Path | str, modules: dict) -> None:
     if problems:
         raise LockVerificationError(
             "locked-module import-path binding failed, refusing to run: " + "; ".join(problems))
+
+
+def _deep_freeze(value):
+    """dict -> read-only MappingProxyType (values recursively frozen), list
+    -> tuple (elements recursively frozen), everything else unchanged. Used
+    by load_verified_config() so nothing downstream can mutate the config
+    object a run actually executes against."""
+    if isinstance(value, dict):
+        return types.MappingProxyType({k: _deep_freeze(v) for k, v in value.items()})
+    if isinstance(value, list):
+        return tuple(_deep_freeze(v) for v in value)
+    return value
+
+
+def load_verified_config(root: Path | str, lock: dict) -> types.MappingProxyType:
+    """Return config.yaml as a deep-frozen structure, loaded fresh from
+    disk bytes and re-verified against `lock`'s own recorded config.yaml
+    sha256 at this point of use - never through twin_config.load_config(),
+    whose @lru_cache returns the SAME mutable dict object on every call in
+    this process: a caller that obtains that object (e.g. via
+    twin_config.load_config() elsewhere) and mutates it - `cfg[...]
+    ["contamination"] = 0.4` - permanently corrupts every future call
+    inside this process, including one made immediately after require_lock()
+    verified the on-disk bytes were untouched (Astra freeze-review r2 group
+    1, 2026-09-28). Loading fresh bytes, re-checking their hash right here,
+    and freezing the result closes that gap regardless of what any other
+    holder of a twin_config-cached dict has done to their copy."""
+    root = Path(root).resolve()
+    path = root / "config.yaml"
+    if not path.is_file():
+        raise LockVerificationError(f"{path} does not exist: cannot load the verified config")
+    raw = path.read_bytes()
+    actual = _sha256_bytes(raw)
+    expected = lock.get("sha256", {}).get("config.yaml")
+    if expected is None or actual != expected:
+        raise LockVerificationError(
+            f"config.yaml sha256 {actual} does not match the locked value {expected!r} at the "
+            "point of use: refusing to run against an unverified or tampered config")
+    import yaml
+
+    cfg = yaml.safe_load(raw)
+    if not isinstance(cfg, dict):
+        raise LockVerificationError(f"{path} is not a mapping")
+    return _deep_freeze(cfg)
+
+
+def reserve_locked_evaluation(root: Path | str) -> Path:
+    """Durable, experiment-wide reservation for a locked evaluation, keyed
+    by experiment-lock.json's own sha256 - deliberately NOT under any
+    caller-chosen --run-dir, so a second locked evaluation cannot obtain a
+    fresh reservation merely by pointing at a different --run-dir, nor by
+    calling runner.pipeline directly instead of the CLI (Astra freeze-
+    review r2 group 4, 2026-09-28: "a different --run-dir or direct
+    pipeline call can repeat it"). O_EXCL: the first locked evaluation for
+    this experiment-lock identity claims the marker; every later attempt -
+    from any run-dir, any caller, forever - refuses."""
+    root = Path(root).resolve()
+    lock_sha = _sha256_file(root / "experiment-lock.json")
+    marker_dir = root / "runs" / "_locked_reservations"
+    marker_dir.mkdir(parents=True, exist_ok=True)
+    marker = marker_dir / f"{lock_sha}.reserved"
+    payload = json.dumps({
+        "reserved_at": datetime.now(timezone.utc).isoformat(),
+        "pid": os.getpid(),
+        "experiment_lock_sha256": lock_sha,
+    }, indent=1, sort_keys=True).encode("utf-8")
+    try:
+        fd = os.open(str(marker), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
+    except FileExistsError as exc:
+        raise LockVerificationError(
+            f"a locked evaluation for experiment-lock.json sha256 {lock_sha} has already been "
+            f"reserved at {marker}: refusing a second locked evaluation for the same "
+            "experiment-lock identity") from exc
+    with os.fdopen(fd, "wb") as fh:
+        fh.write(payload)
+    return marker
 
 
 def verify_lock(repo_root: Path | str | None = None,

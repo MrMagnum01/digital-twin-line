@@ -180,6 +180,36 @@ def test_run_a_genuine_no_candidate_within_cap_still_omits_the_row(monkeypatch):
         assert "isolation_forest" not in models
 
 
+# --- Astra freeze-review r2 group 1 (2026-09-28): the literal probe -
+# mutate twin_config.load_config()'s cached dict's contamination to 0.4,
+# then call pipeline.run(); the value actually used for generation/fitting
+# must still be the locked 0.01, never the mutated 0.4. ---
+
+def test_run_is_unaffected_by_a_mutated_twin_config_cache():
+    import twin_config
+
+    cached = twin_config.load_config()
+    original = cached["models"]["isolation_forest"]["params"]["contamination"]
+    cached["models"]["isolation_forest"]["params"]["contamination"] = 0.4
+    try:
+        report = pipeline.run("dev")
+        assert report["isolation_forest"]["params"]["contamination"] == original == 0.01
+    finally:
+        cached["models"]["isolation_forest"]["params"]["contamination"] = original
+
+
+# --- Astra freeze-review r2 group 4 (2026-09-28): select() must expose a
+# persistence boundary BEFORE test scoring - a SelectionResult with no test
+# data in it at all, distinct from run()'s combined convenience wrapper. ---
+
+def test_select_returns_before_any_test_scoring_score_test_completes_it():
+    sel = pipeline.select("dev")
+    assert not hasattr(sel, "test_results")
+    report = pipeline.score_test(sel)
+    assert report["test_results"]
+    assert report == pipeline.run("dev")
+
+
 def test_run_static_threshold_alert_matches_direct_computation():
     report = pipeline.run("dev")
     k = report["static_threshold"]["chosen_k"]

@@ -2,7 +2,8 @@
 import numpy as np
 import pytest
 
-from monitoring.model_monitor import InsufficientBaselineError, fit_baseline, score_frame
+from monitoring.model_monitor import (InsufficientBaselineError, NonFiniteBaselineError,
+                                     fit_baseline, score_frame)
 
 
 def _frame(cfg, X, eligible, split="dev"):
@@ -94,3 +95,69 @@ def test_score_frame_never_alerts_within_its_own_fitting_interval(cfg):
     assert not alert[10]                          # never alerts on its own fitting interval
     assert scores[10] > np.nanmedian(scores[:50])  # score is still visible, just not causal
     assert causal[60]                              # windows after the fitting interval are causal
+
+
+# --- Astra freeze-review r2 group 2 (2026-09-28): a non-finite eligible
+# model score must raise, never silently become alert=False. ---
+
+def test_score_frame_raises_on_non_finite_eligible_score(cfg, monkeypatch):
+    rng = np.random.default_rng(8)
+    n_cols = len(__import__("features").feature_columns(cfg))
+    X = rng.standard_normal((80, n_cols))
+    frame = _frame(cfg, X, [True] * 80)
+    baseline = fit_baseline(frame, cfg, warmup_windows=50)
+
+    class _BoomModel:
+        def score_samples(self, Xs):
+            out = np.ones(Xs.shape[0])
+            out[5] = np.nan
+            return out
+
+    monkeypatch.setitem(baseline, "model", _BoomModel())
+    with pytest.raises(NonFiniteBaselineError):
+        score_frame(frame, baseline, cfg)
+
+
+def test_score_frame_raises_on_non_finite_baseline_threshold(cfg):
+    rng = np.random.default_rng(9)
+    n_cols = len(__import__("features").feature_columns(cfg))
+    X = rng.standard_normal((80, n_cols))
+    frame = _frame(cfg, X, [True] * 80)
+    baseline = fit_baseline(frame, cfg, warmup_windows=50)
+    baseline["threshold"] = float("nan")
+    with pytest.raises(NonFiniteBaselineError):
+        score_frame(frame, baseline, cfg)
+
+
+# --- Astra freeze-review r2 group 5 (2026-09-28): excluding only the exact
+# fit_window_starts is insufficient - a timestamp before the fitting
+# period (earlier history, scored against a baseline fit later) but not
+# itself one of the fit windows must still be non-causal. ---
+
+def test_score_frame_marks_earlier_history_non_causal_using_the_fit_boundary(cfg):
+    rng = np.random.default_rng(10)
+    n_cols = len(__import__("features").feature_columns(cfg))
+    X_fit = rng.standard_normal((80, n_cols))
+    fit_frame = _frame(cfg, X_fit, [True] * 80)
+    baseline = fit_baseline(fit_frame, cfg, warmup_windows=50)
+    assert baseline["fit_boundary"] == int(fit_frame.window_start[49])
+
+    # An entirely separate, EARLIER frame: none of its window_start values
+    # are members of fit_window_starts (they are disjoint, negative
+    # timestamps), so the old set-membership check would have marked every
+    # one of these windows causal=True even though the baseline did not
+    # exist yet at that time.
+    import features
+
+    n_hist = 20
+    X_hist = rng.standard_normal((n_hist, n_cols))
+    cols = features.feature_columns(cfg)
+    columns = {c: X_hist[:, i] for i, c in enumerate(cols)}
+    window_start = (np.arange(n_hist, dtype=np.int64) - n_hist) * 10  # strictly negative
+    assert not (set(int(w) for w in window_start) & baseline["fit_window_starts"])
+    history_frame = features.FeatureFrame(
+        window_start, columns, np.full(n_hist, "", dtype=object),
+        np.ones(n_hist, dtype=bool), {"split": "dev"})
+
+    _, _, causal = score_frame(history_frame, baseline, cfg)
+    assert not causal.any()

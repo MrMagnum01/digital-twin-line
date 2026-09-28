@@ -49,20 +49,65 @@ def test_cli_refuses_to_overwrite_an_existing_run_dir(tmp_path):
     assert evaluation["table"] == "dev"
 
 
-def test_cli_records_a_failure_artifact_when_the_run_raises(tmp_path, monkeypatch):
+def test_cli_records_a_failure_artifact_when_selection_raises(tmp_path, monkeypatch):
     run_dir = tmp_path / "run2"
 
     def _boom(table_name, *, allow_locked=False, repo_root=None):
         raise RuntimeError("boom")
 
-    monkeypatch.setattr(cli, "run", _boom)
+    monkeypatch.setattr(cli.pipeline, "select", _boom)
     with pytest.raises(RuntimeError, match="boom"):
         main(["--table", "dev", "--run-dir", str(run_dir)])
 
     failure = json.loads((run_dir / "failure.json").read_text())
     assert failure["exception_type"] == "RuntimeError"
     assert failure["exception_message"] == "boom"
+    assert not (run_dir / "selection.json").exists()
     assert not (run_dir / "evaluation.json").exists()
+
+
+# --- Astra freeze-review r2 group 4 (2026-09-28): selection.json must be
+# written exclusively BEFORE any test-split scoring, including when test
+# scoring itself fails - the validation-only selection must still survive
+# on disk as a durable record. ---
+
+def test_cli_records_a_failure_artifact_when_test_scoring_raises_but_keeps_selection(
+        tmp_path, monkeypatch):
+    run_dir = tmp_path / "run3"
+
+    def _boom(sel):
+        raise RuntimeError("test scoring boom")
+
+    monkeypatch.setattr(cli.pipeline, "score_test", _boom)
+    with pytest.raises(RuntimeError, match="test scoring boom"):
+        main(["--table", "dev", "--run-dir", str(run_dir)])
+
+    assert (run_dir / "selection.json").exists()
+    failure = json.loads((run_dir / "failure.json").read_text())
+    assert failure["exception_type"] == "RuntimeError"
+    assert failure["exception_message"] == "test scoring boom"
+    assert not (run_dir / "evaluation.json").exists()
+
+
+def test_cli_writes_selection_json_before_any_test_split_scoring(tmp_path, monkeypatch):
+    """The literal r2 group 4 probe: a fixture interception must observe
+    selection.json already present on disk the moment test-split scoring
+    begins, not merely absent from the in-memory report shape."""
+    import evaluator
+
+    run_dir = tmp_path / "run4"
+    seen_before_test_scoring = {}
+    real_score_stratum = evaluator.score_stratum
+
+    def _spy(inp, events, cfg=None):
+        if inp.split == "test" and "selection_json_existed" not in seen_before_test_scoring:
+            seen_before_test_scoring["selection_json_existed"] = (run_dir / "selection.json").exists()
+        return real_score_stratum(inp, events, cfg)
+
+    monkeypatch.setattr(evaluator, "score_stratum", _spy)
+    monkeypatch.setattr(cli.pipeline.evaluator, "score_stratum", _spy)
+    main(["--table", "dev", "--run-dir", str(run_dir)])
+    assert seen_before_test_scoring == {"selection_json_existed": True}
 
 
 def test_cli_default_run_dir_is_unique_per_invocation():

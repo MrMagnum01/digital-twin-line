@@ -26,6 +26,15 @@ class InsufficientBaselineError(RuntimeError):
     pass
 
 
+class NonFiniteBaselineError(RuntimeError):
+    """Raised when a fitted baseline's own train scores/threshold, or an
+    eligible window's scored value, comes out non-finite. Mirrors
+    runner.models.NonFiniteEligibleInputError: a failed measurement must
+    raise or be reported unknown, never silently become alert=False (Astra
+    freeze-review r2 group 2, 2026-09-28 - "monitor scores must raise
+    everywhere, never turn into False")."""
+
+
 def fit_baseline(frame, cfg: dict, warmup_windows: int = 180) -> dict:
     from sklearn.ensemble import IsolationForest
     from sklearn.preprocessing import RobustScaler
@@ -59,14 +68,23 @@ def fit_baseline(frame, cfg: dict, warmup_windows: int = 180) -> dict:
     Xs = scaler.transform(X_keep)
     model.fit(Xs)
     train_scores = -model.score_samples(Xs)
+    if not np.all(np.isfinite(train_scores)):
+        raise NonFiniteBaselineError(
+            "operational baseline train anomaly scores contain non-finite values: refusing to "
+            "derive a threshold from them")
 
     tc = cfg["models"]["isolation_forest"]["threshold_candidates"]
     thr_q = tc["quantiles"][-1]     # strictest candidate: fewest baseline false alerts
     threshold = float(np.quantile(train_scores, thr_q, method=tc["quantile_method"]))
+    if not np.isfinite(threshold):
+        raise NonFiniteBaselineError(
+            f"operational baseline threshold={threshold!r} is non-finite: refusing to score "
+            "against an undefined threshold rather than silently returning no-alert")
     fit_window_starts = frozenset(int(x) for x in frame.window_start[warm_mask])
+    fit_boundary = int(frame.window_start[warm_mask].max())
     return {"scaler": scaler, "keep_columns": keep, "model": model, "threshold": threshold,
            "threshold_quantile": thr_q, "warmup_windows": warmup_windows,
-           "fit_window_starts": fit_window_starts}
+           "fit_window_starts": fit_window_starts, "fit_boundary": fit_boundary}
 
 
 def score_frame(frame, baseline: dict, cfg: dict):
@@ -74,10 +92,18 @@ def score_frame(frame, baseline: dict, cfg: dict):
     baseline (fit_baseline()'s return dict). Returns (alert, scores,
     causal): bool, float and bool arrays the length of `frame`; scores is
     NaN where ineligible. `causal` is False for ineligible windows AND for
-    the exact windows baseline was fit on (fit_baseline's warm-up slice,
-    identified by window_start) - those scores are in-sample/retrospective,
-    not a causal judgement, and `alert` never fires on a non-causal
-    window."""
+    every window at or before `fit_boundary` (the end of the baseline's own
+    fitting interval) - not merely the exact warm-up window_starts
+    (fit_window_starts). Excluding only the exact fit set is insufficient
+    for scoring EARLIER history: a timestamp before the fitting period but
+    not itself one of the fit windows (e.g. a gap, or a separate, earlier
+    frame passed to this same fixed baseline) would otherwise be marked
+    causal=True, even though the baseline did not exist yet at that time
+    (Astra freeze-review r2 group 5, 2026-09-28). Those earlier/in-sample
+    scores are still returned for visibility, just excluded from causal
+    alert/performance claims. An eligible window whose score comes out
+    non-finite raises rather than silently scoring as no-alert/healthy
+    (mirrors runner.models' eligible-input contract; r2 group 2)."""
     from features import to_matrix
 
     eligible = np.asarray(frame.eligible, dtype=bool)
@@ -87,10 +113,23 @@ def score_frame(frame, baseline: dict, cfg: dict):
         X = to_matrix(frame, baseline["keep_columns"])
         Xs = baseline["scaler"].transform(X)
         scores[eligible] = -baseline["model"].score_samples(Xs)
-    fit_starts = baseline["fit_window_starts"]
-    in_fit_window = np.array([int(ws) in fit_starts for ws in frame.window_start], dtype=bool)
-    causal = eligible & ~in_fit_window
+    bad = eligible & ~np.isfinite(scores)
+    if bad.any():
+        raise NonFiniteBaselineError(
+            f"operational baseline anomaly score is non-finite on {int(bad.sum())} eligible "
+            "window(s): an eligible window must never carry a non-finite score")
+    fit_boundary = baseline.get("fit_boundary")
+    if fit_boundary is None:
+        fit_starts = baseline["fit_window_starts"]
+        after_fit = np.array([int(ws) not in fit_starts for ws in frame.window_start], dtype=bool)
+    else:
+        after_fit = np.asarray(frame.window_start, dtype=np.int64) > fit_boundary
+    causal = eligible & after_fit
+    if not np.isfinite(baseline["threshold"]):
+        raise NonFiniteBaselineError(
+            f"operational baseline threshold={baseline['threshold']!r} is non-finite: refusing "
+            "to score against an undefined threshold rather than silently returning no-alert")
     with np.errstate(invalid="ignore"):
-        beyond = scores > baseline["threshold"]
-    alert = np.where(np.isfinite(scores), beyond, False) & causal
+        beyond = scores > baseline["threshold"]   # NaN comparisons only remain on ineligible rows
+    alert = beyond & causal
     return alert, scores, causal
