@@ -1,0 +1,166 @@
+{
+  "lock_version": "lock-2",
+  "supersedes": {
+    "file": "experiment-lock.v1.json",
+    "sha256": "19afb18920e721ba86f916444071ca2a2ca4effbaf60e268e8ff4b2ffc67cda1",
+    "reason": "Bounded recheck fixes for vault:40-sessions/2026-09-28-astra-twin-lock-review.md MUST-FIX 1-3 (current-window health outcome, evaluator grid validation, static-threshold baseline restored to protocol). No locked-split generation, no model fit, no evaluation run under either lock."
+  },
+  "protocol_doc": {
+    "path": "vault:10-projects/freelance/launch/twin/frozen-ml-protocol.md",
+    "sha256": "c9e1587a3fbaa042cc129b711c3ab2b2ffff88d4a3d1ef92598436b495500fdf"
+  },
+  "source_commit": "c8798bf6bf25136edb94f6e124a8115717ad8f27",
+  "sha256": {
+    "src/generator.py": "4986b03d0eb6744a2881608c989201d3c2ba4466de7d8dcff20787d00d2b0636",
+    "src/ingest.py": "e884def8aa82212e6cf47e67dd3f61553701cc29c6a9bda5d9e891b8ac012721",
+    "src/features.py": "002ff17ef84eb87c57550a74638da0912d6c633d05362d3277ca869f1039eba0",
+    "src/evaluator.py": "b326356eaef847095d5bf8048f8e33af48119e15cc5cd53b3d4b62ce8e1798e7",
+    "config.yaml": "691b6f2fe8b4ab4f2bc9bded7150b795ef83da178f6e369fa124c56f7d260cc0"
+  },
+  "supporting_sha256": {
+    "src/twin_config.py": "5a9755f2127b1b860329de37e82fcec44bfcc1867896c7e163631a856d60434a",
+    "src/schema.sql": "7562c76e09e3b5976ba08c5364d5aa697ebd4e566a8377dc86c6f97a27a1da64",
+    "requirements.txt": "dd9630c519c39e01ee0760cda803e41bfdad88180506c1cdcfd4c9c09dd7ba35",
+    "requirements.lock": "637226b8abfa664b285343ffa3f275fd7976c110502483dd86039104ecce6b7a",
+    "pytest.ini": "8fa307d1ef787f3822b949dc90f1b3c405769c4eb97bb2e813b271109d9d8a90"
+  },
+  "plant_ingest_reference": {
+    "repo": "https://github.com/MrMagnum01/plant-shift-oee-report.git",
+    "commit": "7e378facb410b529d8e2d72d329daf2eee515161",
+    "submodule_path": "vendor/plant-shift-oee-report",
+    "reused_symbols": [
+      "ingester._parse_ts",
+      "ingester._content_hash"
+    ]
+  },
+  "dependency_lock": {
+    "file": "requirements.lock",
+    "file_sha256": "637226b8abfa664b285343ffa3f275fd7976c110502483dd86039104ecce6b7a",
+    "install": "pip install --require-hashes --only-binary=:all: -r requirements.lock",
+    "platform": "CPython 3.13, manylinux x86_64 wheels",
+    "packages": {
+      "cloudpickle": {
+        "version": "3.1.2",
+        "sha256": "9acb47f6afd73f60dc1df93bb801b472f05ff42fa6c84167d25cb206be1fbf4a"
+      },
+      "duckdb": {
+        "version": "1.5.5",
+        "sha256": "078e6a60dd8eedde5832f45422ca5c4a6b8c837aeabd8a56ca0b7d933f588053"
+      },
+      "iniconfig": {
+        "version": "2.3.0",
+        "sha256": "f631c04d2c48c52b84d0d0549c99ff3859c98df65b3101406327ecc7d53fbf12"
+      },
+      "joblib": {
+        "version": "1.6.0",
+        "sha256": "3dbbf9f6e4b592a2357b854608e980fe6390d131d7a82f011a377ef2ebef7aba"
+      },
+      "narwhals": {
+        "version": "2.26.0",
+        "sha256": "29326d74f107c347fd1009bd58e38d9f7c7c5b51e6de97bc93dbc325d9038b54"
+      },
+      "numpy": {
+        "version": "2.5.3",
+        "sha256": "a5fa86b80fd24bcd1aff83ad23be44ea323de3f787be8f8b15d4a65621e25321"
+      },
+      "packaging": {
+        "version": "26.3",
+        "sha256": "d7193f7c8e4e93f444fde0262bf90af30e16fa0ad0ad44cb553c87339b23cd1c"
+      },
+      "pluggy": {
+        "version": "1.6.0",
+        "sha256": "e920276dd6813095e9377c0bc5566d94c932c33b27a3e3945d8389c374dd4746"
+      },
+      "Pygments": {
+        "version": "2.21.0",
+        "sha256": "2363c69b61c4a97c838da3b130dcd6468f4848992b21a82f2a63ec34377137d9"
+      },
+      "pytest": {
+        "version": "9.1.1",
+        "sha256": "37a86b45efb9a47a61a36449063e8e18d0cab3161329fc099eb21783169c4f0c"
+      },
+      "PyYAML": {
+        "version": "6.0.3",
+        "sha256": "0f29edc409a6392443abf94b9cf89ce99889a1dd5376d94316ae5145dfedd5d6"
+      },
+      "scikit-learn": {
+        "version": "1.9.1",
+        "sha256": "55e79d6e9b0923f1a978179822bd43d7f5543f45e970a00fe861f43486380aba"
+      },
+      "scipy": {
+        "version": "1.18.1",
+        "sha256": "fdaf5ea890a6183d0565f51a61799d67081bd5b1cf03c5f4b3fd3732108625c9"
+      },
+      "threadpoolctl": {
+        "version": "3.7.0",
+        "sha256": "cd8b60b5641b45c67bbf73c64c843235fc2d8a480c87389f52f5dbee893b86be"
+      }
+    }
+  },
+  "locked_seed_table": {
+    "day1_utc": "2024-03-04",
+    "splits": [
+      {
+        "name": "train",
+        "seeds": [
+          101,
+          102,
+          103,
+          104,
+          105,
+          106,
+          107,
+          108,
+          109,
+          110
+        ],
+        "assets": [
+          "FILLER",
+          "CAPPER"
+        ]
+      },
+      {
+        "name": "validation",
+        "seeds": [
+          201,
+          202,
+          203,
+          204
+        ],
+        "assets": [
+          "FILLER",
+          "CAPPER"
+        ]
+      },
+      {
+        "name": "test",
+        "seeds": [
+          301,
+          302,
+          303,
+          304,
+          305,
+          306
+        ],
+        "assets": [
+          "LABELLER",
+          "FILLER"
+        ]
+      }
+    ],
+    "test_strata": {
+      "FILLER": "seen_asset_later_time",
+      "LABELLER": "unseen_asset_later_time"
+    }
+  },
+  "development_seeds": [
+    901,
+    902,
+    903,
+    904,
+    905,
+    906
+  ],
+  "generated_at": "2026-09-28T07:27:35+00:00",
+  "note": "Lock only. No evaluation data generated on locked seeds, no model fit, no thresholds chosen, no results read. Generator/features/evaluator tested only on separate development seeds and hand-built fixtures."
+}
