@@ -216,3 +216,56 @@ def test_run_static_threshold_alert_matches_direct_computation():
     if k is None:
         pytest.skip("no static-threshold candidate met the false-alert cap on dev seeds")
     assert k in report["static_threshold"]["k_grid"]
+
+
+# --- Astra freeze-review r3 group 4 (2026-09-28): pipeline.run() must
+# never call select() then score_test() for a locked evaluation without
+# giving the persisted selection a chance to reach durable storage first -
+# it must refuse outright rather than repeat the old dev-convenience
+# shortcut for allow_locked=True. Astra's probe patches select()/score_test
+# /cli._write_exclusive and calls pipeline.run('dev'), observing that the
+# dev convenience path never touches cli's exclusive-write machinery; the
+# same shortcut applied to a locked call is the actual bug. ---
+
+def test_run_refuses_allow_locked_never_calling_select_or_score_test(monkeypatch):
+    from unittest.mock import patch
+
+    from runner import cli
+
+    sentinel = object()
+    with patch.object(pipeline, "select", return_value=sentinel) as select_mock, \
+         patch.object(pipeline, "score_test", return_value={}) as score_mock, \
+         patch.object(cli, "_write_exclusive") as write_mock:
+        with pytest.raises(RuntimeError, match="refuses allow_locked=True"):
+            pipeline.run("locked", allow_locked=True)
+        assert select_mock.call_count == 0
+        assert score_mock.call_count == 0
+        assert write_mock.call_count == 0
+    # dev remains the unrestricted convenience path.
+    report = pipeline.run("dev")
+    assert report["table"] == "dev"
+
+
+# --- Astra freeze-review r3 group 4 (2026-09-28): score_test() must accept
+# only the one persisted, immutable SelectionResult select() itself
+# produced - never a hand-built stand-in merely carrying table='locked'.
+# Astra's exact probe fixture and assertion (inverted: the old bug let this
+# score twice with equal results; the fix refuses it outright, on the very
+# first call, because it is not a real SelectionResult at all). ---
+
+def test_score_test_refuses_a_fixture_that_only_carries_locked_table_identity():
+    from types import SimpleNamespace
+
+    sel = SimpleNamespace(
+        test_assets=[], table="locked", lock={}, dataset_hash="fixture", scaler_report={},
+        static_threshold_report={}, isolation_forest_report={}, validation_baselines={},
+        test_strata={}, honesty_note="fixture")
+    with pytest.raises(TypeError, match="SelectionResult"):
+        pipeline.score_test(sel)
+
+
+def test_score_test_refuses_a_mutated_selection_result():
+    sel = pipeline.select("dev")
+    sel.chosen_k = (sel.chosen_k or 0) + 1.0  # mutate a field score_test() actually uses
+    with pytest.raises(pipeline.SelectionIntegrityError):
+        pipeline.score_test(sel)

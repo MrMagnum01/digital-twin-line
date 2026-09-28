@@ -1,9 +1,11 @@
 """monitoring.model_monitor: hand-built fixtures only."""
+from unittest.mock import patch
+
 import numpy as np
 import pytest
 
-from monitoring.model_monitor import (InsufficientBaselineError, NonFiniteBaselineError,
-                                     fit_baseline, score_frame)
+from monitoring.model_monitor import (InsufficientBaselineError, MissingFitBoundaryError,
+                                     NonFiniteBaselineError, fit_baseline, score_frame)
 
 
 def _frame(cfg, X, eligible, split="dev"):
@@ -161,3 +163,21 @@ def test_score_frame_marks_earlier_history_non_causal_using_the_fit_boundary(cfg
 
     _, _, causal = score_frame(history_frame, baseline, cfg)
     assert not causal.any()
+
+
+# --- Astra freeze-review r3 group 5 (2026-09-28): a missing fit_boundary
+# must RAISE, with no fallback to the fit_window_starts membership test -
+# Astra's exact probe fixture (fit_window_starts={10, 20}, an earlier
+# timestamp of 1) previously came back causal=True through that fallback. ---
+
+def test_score_frame_raises_when_fit_boundary_is_missing():
+    from types import SimpleNamespace
+
+    frame = SimpleNamespace(eligible=np.array([True]), window_start=np.array([1]))
+    baseline = dict(
+        keep_columns=[], scaler=SimpleNamespace(transform=lambda x: x),
+        model=SimpleNamespace(score_samples=lambda x: np.array([-1.0])), threshold=0.5,
+        fit_window_starts={10, 20})
+    with patch("features.to_matrix", return_value=np.array([[0.0]])):
+        with pytest.raises(MissingFitBoundaryError):
+            score_frame(frame, baseline, {})

@@ -4,6 +4,7 @@ against hand-built tampered copies in tmp_path; never against a modified
 copy of the real locked files in place."""
 import hashlib
 import json
+import os
 import shutil
 from pathlib import Path
 
@@ -209,3 +210,85 @@ def test_reserve_locked_evaluation_refuses_a_second_reservation_for_the_same_loc
     # call at all) still hits the same, already-claimed reservation.
     with pytest.raises(lock_guard.LockVerificationError, match="already been reserved"):
         lock_guard.reserve_locked_evaluation(tmp_path)
+
+
+def test_reserve_locked_evaluation_fsyncs_file_and_directory(tmp_path, monkeypatch):
+    _copy_repo_subset(tmp_path)
+    calls = []
+    real_fsync = os.fsync
+    monkeypatch.setattr(os, "fsync", lambda fd: (calls.append(fd), real_fsync(fd))[1])
+    lock_guard.reserve_locked_evaluation(tmp_path)
+    assert len(calls) >= 2  # the file itself, and its containing directory
+
+
+# --- Astra freeze-review r3 group 1 (2026-09-28): a locked evaluation must
+# refuse in-process, never merely rely on import-path equality - only
+# runner.cli's own subprocess re-exec may set CLEAN_SUBPROCESS_ENV. ---
+
+def test_require_clean_subprocess_refuses_without_the_env_marker(monkeypatch):
+    monkeypatch.delenv(lock_guard.CLEAN_SUBPROCESS_ENV, raising=False)
+    with pytest.raises(lock_guard.LockVerificationError, match="fresh interpreter"):
+        lock_guard.require_clean_subprocess()
+
+
+def test_require_clean_subprocess_passes_with_the_env_marker(monkeypatch):
+    monkeypatch.setenv(lock_guard.CLEAN_SUBPROCESS_ENV, "1")
+    lock_guard.require_clean_subprocess()  # no raise
+
+
+# --- Astra freeze-review r3 group 1 (2026-09-28): "installed dependency
+# versions are recorded but not checked" - require_dependency_integrity()
+# must refuse a version mismatch, not merely record what happens to be
+# installed. Uses the REAL lock (matches this venv) with one entry
+# corrupted, never a fabricated lock. ---
+
+def test_require_dependency_integrity_passes_for_the_real_environment():
+    lock = lock_guard.require_lock()
+    lock_guard.require_dependency_integrity(lock)  # no raise: venv matches requirements.lock
+
+
+def test_require_dependency_integrity_rejects_a_version_mismatch():
+    lock = json.loads((REPO / "experiment-lock.json").read_bytes())
+    lock["dependency_lock"]["packages"]["numpy"]["version"] = "0.0.1"
+    with pytest.raises(lock_guard.LockVerificationError, match="numpy"):
+        lock_guard.require_dependency_integrity(lock)
+
+
+def test_require_dependency_integrity_rejects_a_missing_package():
+    lock = json.loads((REPO / "experiment-lock.json").read_bytes())
+    lock["dependency_lock"]["packages"]["not-a-real-installed-package"] = {"version": "1.0.0"}
+    with pytest.raises(lock_guard.LockVerificationError, match="not installed"):
+        lock_guard.require_dependency_integrity(lock)
+
+
+# --- Astra freeze-review r3 group 4 (2026-09-28): score_test() must accept
+# only the one persisted, immutable selection - these are the durable
+# primitives it is built on. Exercised directly against tmp_path, never
+# through pipeline/generator, and never with allow_locked=True. ---
+
+def test_persist_selection_durably_then_require_persisted_selection(tmp_path):
+    marker = lock_guard.persist_selection_durably(tmp_path, "abc123", {"table": "locked"})
+    assert marker.is_file()
+    lock_guard.require_persisted_selection(tmp_path, "abc123")  # no raise
+
+
+def test_require_persisted_selection_refuses_without_a_prior_persist(tmp_path):
+    with pytest.raises(lock_guard.LockVerificationError, match="no durably persisted"):
+        lock_guard.require_persisted_selection(tmp_path, "never-persisted")
+
+
+def test_persist_selection_durably_fsyncs_file_and_directory(tmp_path, monkeypatch):
+    calls = []
+    real_fsync = os.fsync
+    monkeypatch.setattr(os, "fsync", lambda fd: (calls.append(fd), real_fsync(fd))[1])
+    lock_guard.persist_selection_durably(tmp_path, "fsync-id", {"table": "locked"})
+    assert len(calls) >= 2
+
+
+def test_reserve_selection_scoring_refuses_a_second_scoring_of_the_same_selection(tmp_path):
+    marker = lock_guard.reserve_selection_scoring(tmp_path, "sel-id-1")
+    assert marker.is_file()
+    with pytest.raises(lock_guard.LockVerificationError, match="already been scored"):
+        lock_guard.reserve_selection_scoring(tmp_path, "sel-id-1")
+    # a different selection identity is unaffected
+    lock_guard.reserve_selection_scoring(tmp_path, "sel-id-2")

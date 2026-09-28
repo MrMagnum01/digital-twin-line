@@ -23,6 +23,8 @@ run() is the single entry point:
 """
 from __future__ import annotations
 
+import hashlib
+import json
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -34,6 +36,15 @@ import evaluator
 import features as feat
 import generator
 import twin_config
+
+
+class SelectionIntegrityError(RuntimeError):
+    """Raised when a SelectionResult handed to score_test() does not match
+    the identity hash select() computed for it at creation time - i.e. one
+    or more of its selection-defining fields (table, lock, dataset, chosen
+    thresholds/models) were mutated after select() returned (Astra freeze-
+    review r3 group 4, 2026-09-28: "score_test must accept only the one
+    persisted, immutable selection ... refuse repeats or mutation")."""
 
 
 @dataclass
@@ -68,6 +79,32 @@ class SelectionResult:
     chosen_k: float | None
     if_selected: str | None
     chosen_if_threshold: float | None
+    repo_root: Path
+    selection_id: str
+
+
+def _selection_identity(sel) -> str:
+    """A sha256 over exactly the fields that define what score_test() is
+    about to score - table/lock identity, the generated dataset, and the
+    actual chosen thresholds/models (never the bulky intermediate frames or
+    fitted objects) - so a mutated field after select() returned is
+    detected by hash mismatch, and two selections that chose different
+    thresholds never collide on the same identity (Astra freeze-review r3
+    group 4, 2026-09-28: "Bind the persisted selection to the actual
+    thresholds/model used")."""
+    payload = {
+        "table": sel.table,
+        "lock_version": sel.lock.get("lock_version"),
+        "lock_sha256": hashlib.sha256(
+            json.dumps(sel.lock, sort_keys=True, default=str).encode("utf-8")).hexdigest(),
+        "dataset_hash": sel.dataset_hash,
+        "static_selected": sel.static_selected,
+        "chosen_k": sel.chosen_k,
+        "if_selected": sel.if_selected,
+        "chosen_if_threshold": sel.chosen_if_threshold,
+        "test_assets": sorted(sel.test_assets),
+    }
+    return hashlib.sha256(json.dumps(payload, sort_keys=True, default=str).encode("utf-8")).hexdigest()
 
 
 def _cand_summary(pooled: dict) -> dict:
@@ -104,6 +141,14 @@ def select(table_name: str = "dev", *, allow_locked: bool = False, repo_root=Non
         "src/twin_config.py": twin_config,
     })
     if allow_locked:
+        # Refuses unless this process was started fresh, specifically to
+        # run a locked evaluation, by runner.cli's own subprocess re-exec -
+        # never merely by importing runner.pipeline (r3 group 1).
+        lock_guard.require_clean_subprocess()
+        # Installed dependency versions/on-disk file hashes must match the
+        # lock's dependency_lock, not just be recorded after the fact (r3
+        # group 1).
+        lock_guard.require_dependency_integrity(lock)
         lock_guard.require_clean_worktree(root)
         # Experiment-wide, keyed by lock sha, outside any --run-dir: a
         # second locked evaluation of the SAME experiment-lock identity is
@@ -172,7 +217,7 @@ def select(table_name: str = "dev", *, allow_locked: bool = False, repo_root=Non
     test_strata = {a: ("unseen_asset_later_time" if a in unseen else "seen_asset_later_time")
                   for a in test_assets}
 
-    return SelectionResult(
+    sel = SelectionResult(
         table=table_name,
         lock=lock,
         dataset_hash=generator.dataset_hash(ds),
@@ -212,7 +257,21 @@ def select(table_name: str = "dev", *, allow_locked: bool = False, repo_root=Non
         chosen_k=chosen_k,
         if_selected=if_selected,
         chosen_if_threshold=chosen_if_threshold,
+        repo_root=root,
+        selection_id="",
     )
+    sel.selection_id = _selection_identity(sel)
+    if allow_locked:
+        # Durably persisted BEFORE select() returns, regardless of caller
+        # (cli.py or a direct pipeline.select() call): score_test() below
+        # refuses to score a locked selection without a matching record
+        # here (r3 group 4).
+        lock_guard.persist_selection_durably(
+            root, sel.selection_id,
+            {"table": sel.table, "dataset_hash": sel.dataset_hash,
+             "static_selected": sel.static_selected, "chosen_k": sel.chosen_k,
+             "if_selected": sel.if_selected, "chosen_if_threshold": sel.chosen_if_threshold})
+    return sel
 
 
 def score_test(sel: SelectionResult) -> dict:
@@ -220,7 +279,31 @@ def score_test(sel: SelectionResult) -> dict:
     select() already chose on validation - no threshold search on test.
     Split out from select() so a caller can persist the validation-only
     selection to durable storage BEFORE this runs (Astra freeze-review r2
-    group 4, 2026-09-28)."""
+    group 4, 2026-09-28).
+
+    Accepts only an actual, unmutated SelectionResult select() produced:
+    its content hash is recomputed and compared against the selection_id
+    select() stamped on it, refusing anything else - a substitute object
+    (e.g. a hand-built fixture merely carrying `table='locked'`) or a
+    genuine SelectionResult whose fields were changed after select()
+    returned (Astra freeze-review r3 group 4, 2026-09-28: "score_test must
+    accept only the one persisted, immutable selection (verify by hash,
+    refuse repeats or mutation)"). For a locked selection specifically,
+    also refuses unless select() already durably persisted this exact
+    identity, and claims a one-shot consumption marker so the SAME
+    persisted selection can never be scored twice, from any caller,
+    forever."""
+    if not isinstance(sel, SelectionResult):
+        raise TypeError(
+            "score_test() requires an actual SelectionResult produced by pipeline.select(), "
+            f"got {type(sel)!r}")
+    if _selection_identity(sel) != sel.selection_id:
+        raise SelectionIntegrityError(
+            "SelectionResult has been mutated since select() produced it: refusing to score "
+            "test against a selection whose thresholds/model no longer match what was chosen")
+    if sel.table == "locked":
+        lock_guard.require_persisted_selection(sel.repo_root, sel.selection_id)
+        lock_guard.reserve_selection_scoring(sel.repo_root, sel.selection_id)
     test_results: dict = {}
     for asset in sel.test_assets:
         frame = sel.frames[("test", asset)]
@@ -264,7 +347,21 @@ def score_test(sel: SelectionResult) -> dict:
 
 def run(table_name: str = "dev", *, allow_locked: bool = False, repo_root=None) -> dict:
     """Convenience wrapper: select() then score_test() in one call, for
-    dev/fixture iteration and any caller that does not need the
-    selection-before-test persistence boundary select()/score_test() exist
-    to provide."""
+    DEV/fixture iteration only. Refuses outright for a locked evaluation:
+    collapsing select()+score_test() into one call would let a caller score
+    test the moment select() returns, with no opportunity for the
+    validation-only selection to reach durable storage first - exactly the
+    persist-before-test boundary select()/score_test() are split out to
+    provide (Astra freeze-review r3 group 4, 2026-09-28: "pipeline.run
+    called directly must never score test before selection is durably
+    persisted ... make the convenience wrapper dev-only"). A locked
+    evaluation must call select() and score_test() separately (as
+    runner.cli does), so the durably-persisted selection exists on disk
+    before any test-split scoring happens."""
+    if allow_locked:
+        raise RuntimeError(
+            "pipeline.run() is a dev/fixture convenience and refuses allow_locked=True: call "
+            "pipeline.select(allow_locked=True) and pipeline.score_test() separately (as "
+            "runner.cli does) so the validation-only selection is durably persisted before any "
+            "test-split scoring")
     return score_test(select(table_name, allow_locked=allow_locked, repo_root=repo_root))

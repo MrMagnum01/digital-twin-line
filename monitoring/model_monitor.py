@@ -35,6 +35,18 @@ class NonFiniteBaselineError(RuntimeError):
     everywhere, never turn into False")."""
 
 
+class MissingFitBoundaryError(RuntimeError):
+    """Raised when a baseline carries no fit_boundary. There is no safe
+    fallback to exact fit_window_starts membership: that check only
+    excludes the fitting windows themselves, so any earlier, non-member
+    timestamp (a gap, or an separate, earlier frame scored against this
+    same fixed baseline) would be marked causal=True even though the
+    baseline did not exist yet at that time - the exact regression Astra's
+    probe reproduces with fitting timestamps {10, 20} and an earlier
+    timestamp of 1 (Astra freeze-review r3 group 5, 2026-09-28: "a missing
+    fit_boundary must RAISE, with no fallback to the membership test")."""
+
+
 def fit_baseline(frame, cfg: dict, warmup_windows: int = 180) -> dict:
     from sklearn.ensemble import IsolationForest
     from sklearn.preprocessing import RobustScaler
@@ -120,10 +132,11 @@ def score_frame(frame, baseline: dict, cfg: dict):
             "window(s): an eligible window must never carry a non-finite score")
     fit_boundary = baseline.get("fit_boundary")
     if fit_boundary is None:
-        fit_starts = baseline["fit_window_starts"]
-        after_fit = np.array([int(ws) not in fit_starts for ws in frame.window_start], dtype=bool)
-    else:
-        after_fit = np.asarray(frame.window_start, dtype=np.int64) > fit_boundary
+        raise MissingFitBoundaryError(
+            "baseline has no fit_boundary: refusing to fall back to exact fit_window_starts "
+            "membership, which marks any earlier, non-member timestamp causal=True even though "
+            "the baseline did not exist yet at that time")
+    after_fit = np.asarray(frame.window_start, dtype=np.int64) > fit_boundary
     causal = eligible & after_fit
     if not np.isfinite(baseline["threshold"]):
         raise NonFiniteBaselineError(

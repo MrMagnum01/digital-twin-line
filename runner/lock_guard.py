@@ -34,6 +34,7 @@ freeze-review MUST-FIX 1, 2026-09-28):
 """
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
 import os
@@ -51,6 +52,11 @@ APPROVED_LOCK_SHA256 = "c5f6d8873c1cc91902331c057275b6b9990141ed4b70d7c074ea7f6f
 
 PINNED_SUBMODULE_COMMIT = "7e378facb410b529d8e2d72d329daf2eee515161"
 
+# Set only by runner.cli's own subprocess re-exec for a locked table, never
+# by a caller importing runner.pipeline directly - see
+# require_clean_subprocess() (Astra freeze-review r3 group 1, 2026-09-28).
+CLEAN_SUBPROCESS_ENV = "TWIN_RUNNER_LOCKED_CLEAN_SUBPROCESS"
+
 
 class LockVerificationError(RuntimeError):
     """Raised whenever the runner must refuse to proceed: unapproved or
@@ -64,6 +70,32 @@ def _sha256_bytes(data: bytes) -> str:
 
 def _sha256_file(path: Path) -> str:
     return _sha256_bytes(path.read_bytes())
+
+
+def _fsync_dir(dir_path: Path) -> None:
+    """fsync the directory entry itself, not just the file inside it: on a
+    crash between write() and the directory recording the new dentry, an
+    O_EXCL-created file can vanish even though its own fsync succeeded.
+    Exclusivity (O_EXCL) proves no concurrent writer raced us; it is not
+    crash durability on its own (Astra freeze-review r3 group 4, 2026-09-28)."""
+    fd = os.open(str(dir_path), os.O_RDONLY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def _write_exclusive_durable(path: Path, payload: bytes) -> None:
+    """O_EXCL create-and-write `payload` at `path`, fsync the file, then
+    fsync its containing directory. Shared by every durable reservation/
+    artifact marker below."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(str(path), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
+    with os.fdopen(fd, "wb") as fh:
+        fh.write(payload)
+        fh.flush()
+        os.fsync(fh.fileno())
+    _fsync_dir(path.parent)
 
 
 def _submodule_head(repo_root: Path, submodule_path: str) -> str:
@@ -193,7 +225,6 @@ def reserve_locked_evaluation(root: Path | str) -> Path:
     root = Path(root).resolve()
     lock_sha = _sha256_file(root / "experiment-lock.json")
     marker_dir = root / "runs" / "_locked_reservations"
-    marker_dir.mkdir(parents=True, exist_ok=True)
     marker = marker_dir / f"{lock_sha}.reserved"
     payload = json.dumps({
         "reserved_at": datetime.now(timezone.utc).isoformat(),
@@ -201,14 +232,147 @@ def reserve_locked_evaluation(root: Path | str) -> Path:
         "experiment_lock_sha256": lock_sha,
     }, indent=1, sort_keys=True).encode("utf-8")
     try:
-        fd = os.open(str(marker), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
+        _write_exclusive_durable(marker, payload)
     except FileExistsError as exc:
         raise LockVerificationError(
             f"a locked evaluation for experiment-lock.json sha256 {lock_sha} has already been "
             f"reserved at {marker}: refusing a second locked evaluation for the same "
             "experiment-lock identity") from exc
-    with os.fdopen(fd, "wb") as fh:
-        fh.write(payload)
+    return marker
+
+
+def require_clean_subprocess() -> None:
+    """Refuse unless this process was started specifically to run a locked
+    evaluation by runner.cli's own subprocess re-exec, which sets
+    CLEAN_SUBPROCESS_ENV right before spawning a fresh interpreter (never
+    set by a caller that merely imports runner.pipeline). Import-path
+    equality (require_import_paths) only proves where an already-imported
+    module's __file__ resolves; it says nothing about whether that already-
+    loaded bytecode was altered after import in a long-lived process. A
+    freshly started interpreter that then imports the locked modules for
+    the first time closes that gap (Astra freeze-review r3 group 1,
+    2026-09-28: "import-path equality alone is not verification of already-
+    loaded code bytes")."""
+    if os.environ.get(CLEAN_SUBPROCESS_ENV) != "1":
+        raise LockVerificationError(
+            "a locked evaluation must run via `python -m runner.cli --table locked ...`, which "
+            "re-execs into a fresh interpreter and verifies installed dependency versions/hashes "
+            "before importing any locked module: refusing an in-process pipeline.select"
+            "(allow_locked=True) call made outside that fresh subprocess")
+
+
+def require_dependency_integrity(lock: dict) -> None:
+    """Refuse unless every package experiment-lock.json's dependency_lock
+    pins is actually installed, at exactly the locked version, in THIS
+    interpreter's environment, and every file RECORD (pip's own install
+    manifest) lists for it still hashes to what pip recorded at install
+    time. This is deliberately not a re-derivation of dependency_lock's
+    own wheel sha256 (there is no reliable, offline way to recompute the
+    original PyPI wheel hash from files already unpacked on disk); it is
+    the honest, available substitute - installed version plus on-disk
+    file integrity against the package's own install record - so a locked
+    run refuses against a drifted or locally-tampered dependency instead
+    of only recording package versions after the fact (Astra freeze-review
+    r3 group 1, 2026-09-28: "installed dependency versions are recorded but
+    not checked")."""
+    import importlib.metadata as importlib_metadata
+
+    packages = lock.get("dependency_lock", {}).get("packages", {})
+    problems: list[str] = []
+    for name, spec in packages.items():
+        expected_version = spec.get("version")
+        try:
+            dist = importlib_metadata.distribution(name)
+        except importlib_metadata.PackageNotFoundError:
+            problems.append(f"{name}: not installed in this interpreter's environment")
+            continue
+        if dist.version != expected_version:
+            problems.append(
+                f"{name}: installed version {dist.version} does not match locked version "
+                f"{expected_version}")
+            continue
+        record = dist.read_text("RECORD")
+        if record is None:
+            problems.append(f"{name}: no RECORD available to verify installed file integrity")
+            continue
+        base = Path(str(dist.locate_file("")))
+        for line in record.splitlines():
+            parts = line.split(",")
+            if len(parts) < 3 or not parts[1]:
+                continue
+            rel_path, hash_field = parts[0], parts[1]
+            if not hash_field.startswith("sha256="):
+                continue
+            file_path = base / rel_path
+            if not file_path.is_file():
+                problems.append(f"{name}: RECORD-listed file missing on disk: {rel_path}")
+                continue
+            digest = hashlib.sha256(file_path.read_bytes()).digest()
+            actual = "sha256=" + base64.urlsafe_b64encode(digest).rstrip(b"=").decode("ascii")
+            if actual != hash_field:
+                problems.append(
+                    f"{name}: installed file {rel_path} no longer matches its own install "
+                    "RECORD hash")
+    if problems:
+        raise LockVerificationError(
+            "installed dependency verification failed, refusing a locked run: " + "; ".join(problems))
+
+
+def _selection_marker_payload(selection_id: str, extra: dict) -> bytes:
+    payload = {"selection_id": selection_id, "recorded_at": datetime.now(timezone.utc).isoformat(),
+              "pid": os.getpid(), **extra}
+    return json.dumps(payload, indent=1, sort_keys=True, default=str).encode("utf-8")
+
+
+def persist_selection_durably(root: Path | str, selection_id: str, selection: dict) -> Path:
+    """Durably record a validation-only selection BEFORE any test-split
+    scoring may occur for it, keyed by the selection's own content hash
+    (`selection_id`) - independent of any caller-chosen --run-dir, so a
+    direct runner.pipeline call (not just runner.cli) also leaves this
+    record. score_test() refuses to score a locked selection that has no
+    matching record here (Astra freeze-review r3 group 4, 2026-09-28:
+    "pipeline.run called directly must never score test before selection is
+    durably persisted")."""
+    root = Path(root).resolve()
+    marker = root / "runs" / "_selections" / f"{selection_id}.json"
+    payload = _selection_marker_payload(selection_id, {"selection": selection})
+    try:
+        _write_exclusive_durable(marker, payload)
+    except FileExistsError as exc:
+        raise LockVerificationError(
+            f"a selection for identity {selection_id} is already durably persisted at {marker}: "
+            "refusing to persist a second, possibly different, record for the same identity") from exc
+    return marker
+
+
+def require_persisted_selection(root: Path | str, selection_id: str) -> None:
+    """Refuse unless persist_selection_durably() already wrote a durable
+    record for exactly this selection_id - the immutable, content-hashed
+    identity of the selection score_test() is about to score."""
+    root = Path(root).resolve()
+    marker = root / "runs" / "_selections" / f"{selection_id}.json"
+    if not marker.is_file():
+        raise LockVerificationError(
+            f"no durably persisted selection record found for identity {selection_id} at "
+            f"{marker}: refusing to score test before the validation-only selection is on "
+            "durable storage")
+
+
+def reserve_selection_scoring(root: Path | str, selection_id: str) -> Path:
+    """One-shot, durable claim that this exact persisted selection identity
+    is being scored on test - refuses a second scoring of the SAME
+    selection, from any caller, forever (Astra freeze-review r3 group 4,
+    2026-09-28: "score_test must accept only the one persisted, immutable
+    selection ... refuse repeats or mutation")."""
+    root = Path(root).resolve()
+    marker = root / "runs" / "_scored_selections" / f"{selection_id}.scored"
+    payload = _selection_marker_payload(selection_id, {})
+    try:
+        _write_exclusive_durable(marker, payload)
+    except FileExistsError as exc:
+        raise LockVerificationError(
+            f"selection identity {selection_id} has already been scored once at {marker}: "
+            "refusing to repeat test scoring for the same persisted, immutable selection") from exc
     return marker
 
 
